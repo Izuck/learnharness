@@ -18,6 +18,8 @@
 		"start": "next start",
 		"test": "cross-env NODE_ENV=test LH_DATA_DIR= tsx --test tests/*.test.ts tests/*.test.tsx",
 		"lint": "eslint .",
+		"world:generate": "tsx scripts/world/generate.ts",
+		"world:layout": "tsx scripts/world/layout.ts",
 		"typecheck": "tsc --noEmit",
 		"app": "node scripts/launch.mjs",
 		"install-app": "node scripts/install-app.mjs",

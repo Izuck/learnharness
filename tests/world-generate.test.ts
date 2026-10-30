@@ -1,0 +1,117 @@
+/**
+ * Tests for the world generation script (scripts/world/generate.ts) with a
+ * FAKE `ask` — no test ever invokes the real claude binary.
+ */
+
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, it } from "node:test";
+import { claudeEnv, type runClaudeJson } from "../scripts/world/claude-cli.ts";
+import { generateWorld } from "../scripts/world/generate.ts";
+import type { CourseTopicsBatch } from "../src/core/contracts/world.ts";
+import { topicSlug } from "../src/core/world.ts";
+
+const degrees = [{ id: "math", name: "Mathematics" }];
+
+let buildDir = "";
+beforeEach(() => {
+	buildDir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-world-gen-"));
+});
+afterEach(() => {
+	fs.rmSync(buildDir, { recursive: true, force: true });
+});
+
+interface Call {
+	kind: "courses" | "topics";
+	prompt: string;
+}
+
+/** A fake ask: a courses reply, then per-course topics replies from `topics`. */
+function fakeAsk(topics: (course: string, attempt: number) => unknown, calls: Call[] = []): typeof runClaudeJson {
+	const attempts = new Map<string, number>();
+	return (async (o: { prompt: string }) => {
+		if (o.prompt.includes("List the courses")) {
+			calls.push({ kind: "courses", prompt: o.prompt });
+			return { courses: ["A", "B"] };
+		}
+		const course = /^Course: (.+)$/m.exec(o.prompt)?.[1] ?? "?";
+		const n = (attempts.get(course) ?? 0) + 1;
+		attempts.set(course, n);
+		calls.push({ kind: "topics", prompt: o.prompt });
+		return topics(course, n);
+	}) as unknown as typeof runClaudeJson;
+}
+
+const good = (course: string): CourseTopicsBatch => ({
+	degree: "math",
+	course,
+	topics: [{ name: `Topic of ${course}`, scope: "A scope.", prereqs: [] }],
+});
+
+describe("generateWorld", () => {
+	it("asks for courses, then topics per course, and writes each batch", async () => {
+		const calls: Call[] = [];
+		const batches = await generateWorld({
+			degrees,
+			buildDir,
+			ask: fakeAsk((course) => good(course), calls),
+			log: () => {},
+		});
+		assert.deepEqual(calls.map((c) => c.kind), ["courses", "topics", "topics"]);
+		assert.equal(batches.length, 2);
+		for (const b of batches) {
+			const file = path.join(buildDir, "math", `${topicSlug(b.course)}.json`);
+			assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf-8")), b);
+		}
+	});
+
+	it("resumes: a course already on disk is not asked again", async () => {
+		fs.mkdirSync(path.join(buildDir, "math"), { recursive: true });
+		fs.writeFileSync(path.join(buildDir, "math", "a.json"), JSON.stringify(good("A")));
+		const calls: Call[] = [];
+		const batches = await generateWorld({
+			degrees,
+			buildDir,
+			ask: fakeAsk((course) => good(course), calls),
+			log: () => {},
+		});
+		assert.equal(calls.filter((c) => c.kind === "topics").length, 1);
+		assert.ok(!calls.some((c) => c.prompt.includes("Course: A\n")));
+		assert.deepEqual(batches.map((b) => b.course).sort(), ["A", "B"]);
+	});
+
+	it("retries a bad topics reply once, then skips and logs it", async () => {
+		const calls: Call[] = [];
+		const logs: string[] = [];
+		const batches = await generateWorld({
+			degrees,
+			buildDir,
+			ask: fakeAsk((course) => (course === "A" ? { nope: true } : good(course)), calls),
+			log: (s) => logs.push(s),
+		});
+		assert.equal(calls.filter((c) => c.prompt.includes("Course: A\n")).length, 2);
+		assert.deepEqual(batches.map((b) => b.course), ["B"]);
+		assert.ok(!fs.existsSync(path.join(buildDir, "math", "a.json")));
+		assert.ok(fs.existsSync(path.join(buildDir, "math", "b.json")));
+		assert.ok(logs.some((l) => /skip/i.test(l) && l.includes("A")));
+	});
+
+	it("recovers when the retry succeeds", async () => {
+		const batches = await generateWorld({
+			degrees,
+			buildDir,
+			ask: fakeAsk((course, n) => (course === "A" && n === 1 ? { nope: true } : good(course))),
+			log: () => {},
+		});
+		assert.deepEqual(batches.map((b) => b.course), ["A", "B"]);
+	});
+});
+
+describe("claudeEnv", () => {
+	it("drops ANTHROPIC_API_KEY so the plan, not the API, is billed", () => {
+		assert.deepEqual(claudeEnv({ ANTHROPIC_API_KEY: "x", PATH: "p" }), { PATH: "p" });
+		assert.deepEqual(claudeEnv({ anthropic_api_key: "x", PATH: "p" }), { PATH: "p" });
+	});
+});

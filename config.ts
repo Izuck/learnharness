@@ -55,6 +55,21 @@ export type ModelRole =
 	| "auditor";
 
 /**
+ * The WORLD (the forest): every 4-year BS STEM topic, generated once and laid
+ * out once by the Cartographer (src/store/world.ts — its only writer).
+ * topics.json is the world, WORLD.md its human-readable report, build/ the
+ * resumable per-course generator output (<degree>/<course-slug>.json), and
+ * placements.jsonl the append-only ledger placing graph nodes onto topics.
+ */
+export const WORLD_FILES = {
+	dir: path.join(DATA_ROOT, "world"),
+	topics: path.join(DATA_ROOT, "world", "topics.json"),
+	report: path.join(DATA_ROOT, "world", "WORLD.md"),
+	build: path.join(DATA_ROOT, "world", "build"), // <degree>/<course-slug>.json
+	placements: path.join(DATA_ROOT, "world", "placements.jsonl"),
+} as const;
+
+/**
  * The LIVE graph store (src/store/graph.ts) — owned by the app's extraction
  * pipeline. Line shapes: src/core/contracts.ts. CHAINS ARE THE STORED
  * TRUTH (owner, 2026-09-30): edges are a derived view, never stored.

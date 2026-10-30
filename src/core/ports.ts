@@ -26,6 +26,7 @@ import type {
 	TurnUsage,
 	NotesSource,
 } from "./contracts.ts";
+import type { Placement, WorldFile } from "./contracts/world.ts";
 import type { UserSettings } from "./settings.ts";
 
 // ─── ChatStore — the session record's home (data/chats) ─────────────────────
@@ -222,3 +223,20 @@ export interface AuthStore {
 	deleteAuthVar(name: string): void;
 }
 
+// ─── WorldStore — the forest's home (data/world) ────────────────────────────
+
+/**
+ * The Cartographer's store: the generated world file and the placements
+ * ledger. This adapter is the ONLY writer of data/world/* (the generation
+ * scripts write through it too).
+ */
+export interface WorldStore {
+	/** The world, or null when topics.json is absent or invalid. */
+	readWorld(): WorldFile | null;
+	/** Persist the world atomically (temp file + rename). */
+	writeWorld(world: WorldFile): void;
+	/** Append one placement line (the latest line per node wins). */
+	appendPlacement(p: Placement): void;
+	/** Every placement line in order; corrupt lines skipped. */
+	readPlacements(): Placement[];
+}
