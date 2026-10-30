@@ -86,7 +86,7 @@ export function runClaudeJson<T>(o: {
 		"--no-session-persistence",
 	];
 
-	return new Promise<string>((resolve, reject) => {
+	return new Promise<{ out: string; err: string; code: number | null }>((resolve, reject) => {
 		const child = spawn(claudeBinary(), args, { cwd: os.tmpdir(), env: claudeEnv(), windowsHide: true });
 		let out = "";
 		let err = "";
@@ -103,12 +103,22 @@ export function runClaudeJson<T>(o: {
 		child.on("close", (code) => {
 			clearTimeout(timer);
 			if (!out.trim()) reject(new Error(`claude exited ${code}: ${err.slice(0, 500)}`));
-			else resolve(out);
+			else resolve({ out, err, code });
+		});
+		// An early child exit closes stdin; reject instead of crashing on EPIPE.
+		child.stdin.on("error", (e) => {
+			clearTimeout(timer);
+			reject(new Error(`claude closed its input early: ${e.message}. stderr: ${err.slice(0, 500)}`));
 		});
 		child.stdin.end(o.prompt);
 	})
-		.then((stdout) => {
-			const res = JSON.parse(stdout) as ClaudeJsonResult;
+		.then(({ out: stdout, err: stderrText, code: exitCode }) => {
+			let res: ClaudeJsonResult;
+			try {
+				res = JSON.parse(stdout) as ClaudeJsonResult;
+			} catch {
+				throw new Error(`claude output was not JSON (exit ${exitCode}): stderr: ${stderrText.slice(0, 500)}; stdout: ${stdout.slice(0, 200)}`);
+			}
 			if (res.is_error) throw new Error(res.result || `claude error (${res.subtype ?? "unknown"})`);
 			return (res.structured_output ?? extractJson(res.result ?? "")) as T;
 		})

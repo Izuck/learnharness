@@ -12,9 +12,11 @@ import { describe, it } from "node:test";
 import type {
 	CourseTopicsBatch,
 	Placement,
+	WorldFile,
 	WorldTopic,
 } from "../src/core/contracts/world.ts";
 import {
+	carryPositions,
 	isCourseTopicsBatch,
 	isWorldFile,
 	mergeDegreeTopics,
@@ -209,5 +211,42 @@ describe("world: topicCandidates", () => {
 		const tied = [mk("b-topic", "Alpha", ""), mk("a-topic", "Alpha", "")];
 		const r = topicCandidates("alpha", tied, 2);
 		assert.deepEqual(r.map((t) => t.id), ["a-topic", "b-topic"]);
+	});
+});
+
+describe("world: carryPositions", () => {
+	const t = (id: string, position?: { x: number; y: number }): WorldTopic => ({
+		id,
+		name: id,
+		scope: "",
+		degrees: ["math"],
+		courses: ["c"],
+		prereqs: [],
+		...(position ? { position } : {}),
+	});
+	const prev: WorldFile = {
+		version: 1,
+		generatedAt: "x",
+		degrees: [{ id: "math", name: "Mathematics" }],
+		topics: [t("a", { x: 1, y: 2 }), t("gone", { x: 9, y: 9 }), t("unplaced")],
+	};
+
+	it("keeps saved positions by id, leaves new topics unpositioned, drops vanished ones", () => {
+		const out = carryPositions([t("a"), t("b"), t("unplaced")], prev);
+		assert.deepEqual(out.map((x) => x.id), ["a", "b", "unplaced"]);
+		assert.deepEqual(out[0]?.position, { x: 1, y: 2 });
+		assert.equal(out[1]?.position, undefined);
+		assert.equal(out[2]?.position, undefined);
+	});
+
+	it("returns the topics untouched with no previous world", () => {
+		const next = [t("a")];
+		assert.deepEqual(carryPositions(next, null), next);
+	});
+
+	it("does not mutate its inputs", () => {
+		const next = [t("a")];
+		carryPositions(next, prev);
+		assert.equal(next[0]?.position, undefined);
 	});
 });

@@ -127,6 +127,19 @@ export function isCourseTopicsBatch(v: unknown): v is CourseTopicsBatch {
 	);
 }
 
+/** Carry layout positions from a previous world into freshly merged topics,
+ *  by topic id: a topic's position never changes once saved. New topics stay
+ *  unpositioned; topics absent from `next` are dropped. */
+export function carryPositions(next: WorldTopic[], prev: WorldFile | null): WorldTopic[] {
+	if (!prev) return next;
+	const old = new Map<string, WorldTopic["position"]>();
+	for (const t of prev.topics) if (t.position) old.set(t.id, t.position);
+	return next.map((t) => {
+		const position = old.get(t.id);
+		return position ? { ...t, position: { ...position } } : t;
+	});
+}
+
 /** Resolve the append-only placements ledger: per node, the line with the
  *  latest placedAt wins (a tie goes to the later line). Lines for nodes not
  *  in `liveNodeIds` are ignored; a `null` topicId is kept as null. */

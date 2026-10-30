@@ -18,7 +18,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WORLD_FILES } from "../../config.ts";
 import type { CourseTopicsBatch, WorldDegree } from "../../src/core/contracts/world.ts";
-import { isCourseTopicsBatch, mergeDegreeTopics, topicSlug } from "../../src/core/world.ts";
+import { carryPositions, isCourseTopicsBatch, mergeDegreeTopics, topicSlug } from "../../src/core/world.ts";
 import { WORLD_DEGREES } from "../../src/core/world-layout.ts";
 import { worldStore } from "../../src/store/world.ts";
 import { runClaudeJson } from "./claude-cli.ts";
@@ -53,6 +53,14 @@ const TOPICS_SCHEMA = {
 };
 
 const COURSES_CACHE = "_courses.json";
+
+/** Stop the run after this many courses in a row fail (retried and still bad
+ *  or thrown) - most likely the plan limit; a rerun resumes. */
+const MAX_CONSECUTIVE_FAILURES = 3;
+
+/** A usable batch: right shape AND at least one topic (an empty list would be
+ *  cached as "done" and the course skipped forever). */
+const isUsableBatch = (v: unknown): v is CourseTopicsBatch => isCourseTopicsBatch(v) && v.topics.length > 0;
 
 const readJson = (file: string): unknown => {
 	try {
@@ -96,6 +104,7 @@ export async function generateWorld(o: {
 	const coursesPrompt = fs.readFileSync(path.join(PROMPTS, "courses.md"), "utf-8");
 	const topicsPrompt = fs.readFileSync(path.join(PROMPTS, "topics.md"), "utf-8");
 	const batches: CourseTopicsBatch[] = [];
+	let failures = 0;
 
 	for (const degree of o.degrees) {
 		const dir = path.join(buildDir, degree.id);
@@ -133,7 +142,7 @@ export async function generateWorld(o: {
 		for (const course of courses) {
 			const file = path.join(dir, `${topicSlug(course) || "course"}.json`);
 			const existing = readJson(file);
-			if (isCourseTopicsBatch(existing)) {
+			if (isUsableBatch(existing)) {
 				log(`${degree.name} / ${course}: already done`);
 				batches.push(existing);
 				continue;
@@ -148,14 +157,23 @@ export async function generateWorld(o: {
 						prompt: `Degree: ${degree.id} (${degree.name})\nCourse: ${course}\n`,
 						schema: TOPICS_SCHEMA,
 					});
-					return isCourseTopicsBatch(r) ? r : null;
+					return isUsableBatch(r) ? r : null;
 				},
 				log,
 			);
 			if (!batch) {
 				log(`${degree.name} / ${course}: skipped`);
+				failures++;
+				if (failures >= MAX_CONSECUTIVE_FAILURES) {
+					log(
+						`Stopped early after ${failures} courses failed in a row (plan limit?). ` +
+							"Batches already written are kept; rerun to resume.",
+					);
+					return batches;
+				}
 				continue;
 			}
+			failures = 0;
 			// Pin the identity the merge keys on, whatever the model echoed.
 			const done: CourseTopicsBatch = { ...batch, degree: degree.id, course };
 			fs.writeFileSync(file, JSON.stringify(done, null, "\t"), "utf-8");
@@ -217,7 +235,10 @@ async function main(): Promise<void> {
 	// The world is every batch on disk, so a partial run still yields a
 	// consistent topics.json of what has been generated so far.
 	const batches = readAllBatches(WORLD_FILES.build);
-	const { topics, unresolvedPrereqs } = mergeDegreeTopics(batches);
+	const merged = mergeDegreeTopics(batches);
+	const { unresolvedPrereqs } = merged;
+	// A rerun must not wipe positions a previous layout saved.
+	const topics = carryPositions(merged.topics, worldStore.readWorld());
 	const present = WORLD_DEGREES.filter((d) => batches.some((b) => b.degree === d.id));
 	worldStore.writeWorld({
 		version: 1,

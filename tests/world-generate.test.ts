@@ -109,6 +109,73 @@ describe("generateWorld", () => {
 	});
 });
 
+describe("generateWorld: robustness", () => {
+	const emptyBatch = (course: string): CourseTopicsBatch => ({ degree: "math", course, topics: [] });
+
+	it("treats an empty topics list as a bad reply: retried once, skipped, nothing written", async () => {
+		const calls: Call[] = [];
+		const logs: string[] = [];
+		const batches = await generateWorld({
+			degrees,
+			buildDir,
+			ask: fakeAsk((course) => (course === "A" ? emptyBatch(course) : good(course)), calls),
+			log: (s) => logs.push(s),
+		});
+		assert.equal(calls.filter((c) => c.prompt.includes("Course: A\n")).length, 2);
+		assert.deepEqual(batches.map((b) => b.course), ["B"]);
+		assert.ok(!fs.existsSync(path.join(buildDir, "math", "a.json")));
+		assert.ok(logs.some((l) => /skip/i.test(l) && l.includes("A")));
+	});
+
+	it("does not trust an empty cached batch on resume", async () => {
+		fs.mkdirSync(path.join(buildDir, "math"), { recursive: true });
+		fs.writeFileSync(path.join(buildDir, "math", "a.json"), JSON.stringify(emptyBatch("A")));
+		const calls: Call[] = [];
+		const batches = await generateWorld({
+			degrees,
+			buildDir,
+			ask: fakeAsk((course) => good(course), calls),
+			log: () => {},
+		});
+		assert.equal(calls.filter((c) => c.prompt.includes("Course: A\n")).length, 1);
+		assert.deepEqual(batches.map((b) => b.course), ["A", "B"]);
+		const onDisk = JSON.parse(fs.readFileSync(path.join(buildDir, "math", "a.json"), "utf-8"));
+		assert.equal(onDisk.topics.length, 1);
+	});
+
+	it("aborts after 3 consecutive course failures and keeps earlier batches", async () => {
+		const courses = ["A", "B", "C", "D", "E", "F"];
+		const calls: Call[] = [];
+		const logs: string[] = [];
+		const ask = (async (o: { prompt: string }) => {
+			if (o.prompt.includes("List the courses")) return { courses };
+			const course = /^Course: (.+)$/m.exec(o.prompt)?.[1] ?? "?";
+			calls.push({ kind: "topics", prompt: o.prompt });
+			if (course === "A") return good("A");
+			throw new Error("usage limit reached");
+		}) as unknown as typeof runClaudeJson;
+		const batches = await generateWorld({ degrees, buildDir, ask, log: (s) => logs.push(s) });
+		assert.deepEqual(batches.map((b) => b.course), ["A"]);
+		assert.ok(fs.existsSync(path.join(buildDir, "math", "a.json")));
+		// A once, then B, C, D twice each (retry) - E and F never asked.
+		assert.equal(calls.length, 1 + 3 * 2);
+		assert.ok(!calls.some((c) => /Course: [EF]\n/.test(c.prompt)));
+		assert.ok(logs.some((l) => /stopped early/i.test(l) && /resume/i.test(l)));
+	});
+
+	it("a success resets the failure streak", async () => {
+		const courses = ["A", "B", "C", "D", "E", "F", "G"];
+		const bad = new Set(["A", "B", "D", "E"]);
+		const ask = (async (o: { prompt: string }) => {
+			if (o.prompt.includes("List the courses")) return { courses };
+			const course = /^Course: (.+)$/m.exec(o.prompt)?.[1] ?? "?";
+			return bad.has(course) ? { nope: true } : good(course);
+		}) as unknown as typeof runClaudeJson;
+		const batches = await generateWorld({ degrees, buildDir, ask, log: () => {} });
+		assert.deepEqual(batches.map((b) => b.course), ["C", "F", "G"]);
+	});
+});
+
 describe("claudeEnv", () => {
 	it("drops ANTHROPIC_API_KEY so the plan, not the API, is billed", () => {
 		assert.deepEqual(claudeEnv({ ANTHROPIC_API_KEY: "x", PATH: "p" }), { PATH: "p" });
