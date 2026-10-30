@@ -23,7 +23,7 @@ foreach ($dir in $places) {
 		continue
 	}
 	$sh = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
-	$sh.TargetPath = Join-Path $env:WINDIR 'System32\wscript.exe'
+	$sh.TargetPath = Join-Path $env:WINDIR 'System32/wscript.exe'
 	$sh.Arguments = '"${esc(path.join(ROOT, "scripts", "launch-hidden.vbs"))}"'
 	$sh.WorkingDirectory = '${esc(ROOT)}'
 	$sh.IconLocation = '${esc(path.join(ROOT, "build", "icon.ico"))},0'

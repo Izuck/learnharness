@@ -15,3 +15,14 @@ test("strips ANTHROPIC_API_KEY from the claude child env", () => {
 		delete process.env.ANTHROPIC_API_KEY;
 	}
 });
+
+test("strips ANTHROPIC_API_KEY under any casing (Windows env names are case-insensitive)", () => {
+	process.env.Anthropic_Api_Key = "sk-test";
+	try {
+		const env = toClaudeEnv();
+		const leaked = Object.keys(env).filter((name) => name.toUpperCase() === "ANTHROPIC_API_KEY");
+		assert.deepEqual(leaked, []);
+	} finally {
+		delete process.env.Anthropic_Api_Key;
+	}
+});

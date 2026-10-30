@@ -614,8 +614,8 @@ export function toClaudeEnv(): NodeJS.ProcessEnv {
 	// Preserve native CLI auth/routing, including launch-environment credentials.
 	// Claude Code chooses the account and billing method, not LearnHarness.
 	const env: NodeJS.ProcessEnv = { ...externalCliEnv(), MCP_TOOL_TIMEOUT: String(MCP_TOOL_TIMEOUT_MS) };
-	// This fork bills the signed-in Claude plan, never the API.
-	delete env.ANTHROPIC_API_KEY;
+	// This fork bills the signed-in Claude plan, never the API. Windows env names are case-insensitive, so match any casing.
+	for (const name of Object.keys(env)) if (name.toUpperCase() === "ANTHROPIC_API_KEY") delete env[name];
 	return env;
 }
 

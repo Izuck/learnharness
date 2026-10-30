@@ -3,6 +3,7 @@
 // opens it in its own window, and stops the server when the window closes.
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
@@ -10,7 +11,7 @@ const PORT = process.env.PORT || "3000";
 const APP_URL = `http://localhost:${PORT}`;
 const NEXT = path.join(ROOT, "node_modules", "next", "dist", "bin", "next");
 // Every mutable record (chats, graph) lives here, outside the repo, so it survives re-clones and tests never touch it.
-const DATA = process.env.LH_DATA_DIR || "C:\Users\isaac\Documents\learnharness-data";
+const DATA = process.env.LH_DATA_DIR || path.join(os.homedir(), "Documents", "learnharness-data");
 const PROFILE = path.join(DATA, ".app-window"); // the window's own browser profile, separate from yours
 
 fs.mkdirSync(DATA, { recursive: true });
@@ -27,8 +28,8 @@ async function up() {
 }
 
 function findBrowser() {
-	const pf86 = process.env["ProgramFiles(x86)"] || "C:\Program Files (x86)";
-	const pf = process.env.ProgramFiles || "C:\Program Files";
+	const pf86 = process.env["ProgramFiles(x86)"] || "C:/Program Files (x86)";
+	const pf = process.env.ProgramFiles || "C:/Program Files";
 	const local = process.env.LOCALAPPDATA || "";
 	const candidates = [
 		path.join(pf86, "Microsoft", "Edge", "Application", "msedge.exe"),
