@@ -52,7 +52,8 @@ export type ModelRole =
 	| "visualMaker"
 	| "pdfReader"
 	| "extractor"
-	| "auditor";
+	| "auditor"
+	| "placer";
 
 /**
  * The WORLD (the forest): every 4-year BS STEM topic, generated once and laid

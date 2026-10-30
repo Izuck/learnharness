@@ -14,6 +14,7 @@ import { SubscriptionRequestCycle, type SubscriptionDispatchLifecycle } from "..
 import { reconstructRequestCause } from "../core/native-messages.ts";
 import { createJobRunner } from "../agent/subagents/runner.ts";
 import { createExtractionPipeline } from "../agent/subagents/extraction.ts";
+import { createPlacer, withPlacement } from "../agent/subagents/placer.ts";
 import type { ModelRole } from "../../config.ts";
 import {
 	deliverJobResult,
@@ -116,7 +117,7 @@ const jobRunner = createJobRunner({
 /** The app's ONE extraction pipeline instance — both front doors share it:
  *  quiz-triggered session runs (turn-service) and notes imports
  *  (/api/graph/import) hit the same single-flight registry. */
-export const extraction = createExtractionPipeline({
+export const extraction = withPlacement(createExtractionPipeline({
 	...stores,
 	// BYOK (owner, 2026-09-22): the extraction stages resolve the chain —
 	// role override → slot → NOTHING — read FRESH per stage call; an empty
@@ -129,7 +130,13 @@ export const extraction = createExtractionPipeline({
 	// refuses BEFORE any batch runs (the typed throw), never mid-run.
 	providerKeyMissing: (provider, tier) =>
 		providerKeyPresent(provider) ? null : providerKeyMissingEnvelope(provider, [tier]),
-});
+}), createPlacer({
+	...stores,
+	// The placer (forest) runs after every successful extraction, appending
+	// each new proposition's topic to the world store's ledger. Same BYOK
+	// chain as the stages: role override -> slot -> nothing (skips honestly).
+	engineFor: (role) => resolveEngine(role),
+}));
 
 
 // Wake-pipeline wiring (contracts.ts "THE ASYNC PROTOCOL" §4): the pipeline
