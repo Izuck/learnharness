@@ -586,7 +586,7 @@ test("spawns with the model alias, effort, bridge tools, MCP_TOOL_TIMEOUT and th
 	assert.equal(call.env.CLAUDE_CONFIG_DIR, process.env.CLAUDE_CONFIG_DIR);
 });
 
-test("preserves existing CLI environment authentication without a subscription guarantee", async (t) => {
+test("preserves existing CLI environment authentication except ANTHROPIC_API_KEY (fork: plan billing only)", async (t) => {
 	const saved = { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN };
 	t.after(() => {
 		for (const [name, value] of Object.entries(saved)) {
@@ -601,7 +601,7 @@ test("preserves existing CLI environment authentication without a subscription g
 	const { calls } = await runScenario(t, readFixtureLines("text.jsonl"));
 	const call = getOnlyCall(calls);
 
-	assert.equal(call.env.ANTHROPIC_API_KEY, "sk-ant-test");
+	assert.equal(call.env.ANTHROPIC_API_KEY, undefined);
 	assert.equal(call.env.ANTHROPIC_AUTH_TOKEN, "token-test");
 });
 

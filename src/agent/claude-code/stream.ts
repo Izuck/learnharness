@@ -610,10 +610,13 @@ function continueLiveProcess(turn: ClaudeTurn, owner: symbol, sessionId: string 
 	return true;
 }
 
-function toClaudeEnv(): NodeJS.ProcessEnv {
+export function toClaudeEnv(): NodeJS.ProcessEnv {
 	// Preserve native CLI auth/routing, including launch-environment credentials.
 	// Claude Code chooses the account and billing method, not LearnHarness.
-	return { ...externalCliEnv(), MCP_TOOL_TIMEOUT: String(MCP_TOOL_TIMEOUT_MS) };
+	const env: NodeJS.ProcessEnv = { ...externalCliEnv(), MCP_TOOL_TIMEOUT: String(MCP_TOOL_TIMEOUT_MS) };
+	// This fork bills the signed-in Claude plan, never the API.
+	delete env.ANTHROPIC_API_KEY;
+	return env;
 }
 
 async function startProcess(
