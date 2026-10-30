@@ -84,6 +84,14 @@ const THREE = [
 	node("n_c", "Heat flow", "Heat flows from hot bodies to cold bodies."),
 ];
 
+/** Stub console.warn for one test; returns the captured calls and a restore. */
+function captureWarn() {
+	const original = console.warn;
+	const calls: unknown[][] = [];
+	console.warn = (...args: unknown[]) => void calls.push(args);
+	return { calls, restore: () => void (console.warn = original) };
+}
+
 // ─── tests ───────────────────────────────────────────────────────────────────
 
 describe("placer", () => {
@@ -176,6 +184,47 @@ describe("placer", () => {
 		assert.equal(world.lines[0]?.topicId, null);
 	});
 
+	it("a batch that never submits is skipped and the later batches still place", async () => {
+		const warn = captureWarn();
+		try {
+			const world = memoryWorld(worldFile([THERMO, LINALG]));
+			const nodes = Array.from({ length: 60 }, (_, i) =>
+				node(`n_${String(i).padStart(3, "0")}`, `Entropy ${i}`, "Entropy in a thermodynamics setting."),
+			);
+			const ids = nodes.map((n) => n.id).sort();
+			const middle = new Set(ids.slice(20, 40));
+			// Answers by reading the batch out of the prompt: the middle batch
+			// only ever submits an unoffered topic, so it never validates.
+			const step: FauxResponseStep = (context) => {
+				const batch = [...JSON.stringify(context.messages).matchAll(/PROPOSITION (n_\d+)/g)].map((m) => m[1] as string);
+				const bad = middle.has(batch[0] as string);
+				return fauxAssistantMessage(
+					[
+						fauxToolCall(
+							"submit_placements",
+							placements(...batch.map((id): [string, string] => [id, bad ? "no-such-topic" : "thermodynamics"])) as ToolCall["arguments"],
+							{ id: "placements-call" },
+						),
+					],
+					{ stopReason: "toolUse" },
+				);
+			};
+			const placer = createPlacer({
+				graphStore: memoryGraph(nodes),
+				worldStore: world,
+				engineFor: () => fauxEngine(Array.from({ length: 12 }, () => step)),
+			});
+			const stats = await placer.placeUnplaced();
+			assert.deepEqual(stats, { placed: 40, uncharted: 0, skipped: 20 });
+			assert.equal(world.lines.length, 40);
+			assert.ok(world.lines.every((l) => !middle.has(l.nodeId)));
+			assert.equal(warn.calls.length, 1);
+			assert.match(String(warn.calls[0]?.[0]), new RegExp(ids[20] as string));
+		} finally {
+			warn.restore();
+		}
+	});
+
 	it("no world yet: skipped, no model call", async () => {
 		const world = memoryWorld(null);
 		let calls = 0;
@@ -239,12 +288,19 @@ describe("withPlacement", () => {
 
 	it("a failing placer never fails the extraction", async () => {
 		const pipeline: ExtractionPipeline = { runExtraction: async () => stats, importNotes: async () => stats };
-		const wrapped = withPlacement(pipeline, {
-			placeUnplaced: async () => {
-				throw new Error("placer down");
-			},
-		});
-		assert.equal(await wrapped.runExtraction("chat"), stats);
+		const warn = captureWarn();
+		try {
+			const wrapped = withPlacement(pipeline, {
+				placeUnplaced: async () => {
+					throw new Error("placer down");
+				},
+			});
+			assert.equal(await wrapped.runExtraction("chat"), stats);
+			await new Promise((resolve) => setImmediate(resolve));
+			assert.equal(warn.calls.length, 1);
+		} finally {
+			warn.restore();
+		}
 	});
 });
 

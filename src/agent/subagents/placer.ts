@@ -113,36 +113,50 @@ export function createPlacer(deps: PlacerDeps): { placeUnplaced(signal?: AbortSi
 			if (batch.length === 0) continue;
 
 			const offered = new Map(batch.map((n) => [n.id, new Set(n.candidates.map((t) => t.id))]));
-			const answer = await withBgLlmSlot(signal, () =>
-				runSubmitAgent<PlacementsSubmit>({
-					role: "placer",
-					toolName: "submit_placements",
-					toolDescription: "Submit one placement per proposition in the batch.",
-					parameters: placementsSchema,
-					fill: (input) => input as PlacementsSubmit,
-					systemPrompt: PLACER_INSTRUCTIONS,
-					prompt: batchPrompt(batch),
-					engine,
-					signal,
-					onStep: () => undefined,
-					neverSubmitted: "the placer never submitted placements",
-					validate: (value) => {
-						const seen = new Set<string>();
-						for (const p of value.placements) {
-							const allowed = offered.get(p.nodeId);
-							if (!allowed) return `placements: "${p.nodeId}" is not in this batch.`;
-							if (seen.has(p.nodeId)) return `placements: "${p.nodeId}" appears more than once.`;
-							seen.add(p.nodeId);
-							if (p.topicId !== null && !allowed.has(p.topicId)) {
-								return `placements: "${p.topicId}" is not one of the topics offered for "${p.nodeId}" — choose an offered topic id or null.`;
+			// One bad batch must not starve the later ones: a failed batch's
+			// nodes stay unplaced (retried on a later run) and the run moves on.
+			// Aborts still end the whole run.
+			let answer: PlacementsSubmit;
+			try {
+				answer = await withBgLlmSlot(signal, () =>
+					runSubmitAgent<PlacementsSubmit>({
+						role: "placer",
+						toolName: "submit_placements",
+						toolDescription: "Submit one placement per proposition in the batch.",
+						parameters: placementsSchema,
+						fill: (input) => input as PlacementsSubmit,
+						systemPrompt: PLACER_INSTRUCTIONS,
+						prompt: batchPrompt(batch),
+						engine,
+						signal,
+						onStep: () => undefined,
+						neverSubmitted: "the placer never submitted placements",
+						validate: (value) => {
+							const seen = new Set<string>();
+							for (const p of value.placements) {
+								const allowed = offered.get(p.nodeId);
+								if (!allowed) return `placements: "${p.nodeId}" is not in this batch.`;
+								if (seen.has(p.nodeId)) return `placements: "${p.nodeId}" appears more than once.`;
+								seen.add(p.nodeId);
+								if (p.topicId !== null && !allowed.has(p.topicId)) {
+									return `placements: "${p.topicId}" is not one of the topics offered for "${p.nodeId}" — choose an offered topic id or null.`;
+								}
 							}
-						}
-						const missing = batch.find((n) => !seen.has(n.id));
-						if (missing) return `placements: "${missing.id}" is missing — answer for every proposition in the batch.`;
-						return null;
-					},
-				}),
-			);
+							const missing = batch.find((n) => !seen.has(n.id));
+							if (missing) return `placements: "${missing.id}" is missing — answer for every proposition in the batch.`;
+							return null;
+						},
+					}),
+				);
+			} catch (err) {
+				if (signal?.aborted || (err instanceof Error && err.name === "AbortError")) throw err;
+				console.warn(
+					`[placer] batch starting at ${batch[0]?.id} failed, leaving ${batch.length} node(s) unplaced:`,
+					err instanceof Error ? err.message : err,
+				);
+				stats.skipped += batch.length;
+				continue;
+			}
 			for (const p of answer.placements) write(p.nodeId, p.topicId);
 		}
 		return stats;
