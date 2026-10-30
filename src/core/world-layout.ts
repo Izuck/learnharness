@@ -1,0 +1,147 @@
+/**
+ * World layout — the permanent positions of the fixed forest.
+ *
+ * Each topic is pulled toward its degree anchor(s) (the mean of its degrees'
+ * anchors, so a shared topic sits between its degrees), springs link
+ * prerequisites together, and collision keeps topics from stacking. Topics
+ * that already have a position are PINNED (fx/fy) and never move: positions
+ * are append-only, a new topic is settled around the existing ones.
+ *
+ * PURE and DETERMINISTIC: same topics + seed → same layout. The prereq graph
+ * may contain cycles; d3-force does not care.
+ */
+
+import {
+	forceCollide,
+	forceLink,
+	forceManyBody,
+	forceSimulation,
+	forceX,
+	forceY,
+	type SimulationLinkDatum,
+	type SimulationNodeDatum,
+} from "d3-force";
+import type { WorldDegree, WorldPosition, WorldTopic } from "./contracts/world.ts";
+
+export const WORLD_DEGREES: readonly WorldDegree[] = [
+	{ id: "math", name: "Mathematics" },
+	{ id: "physics", name: "Physics" },
+	{ id: "ee", name: "Electrical Engineering" },
+	{ id: "cs", name: "Computer Science" },
+	{ id: "chemistry", name: "Chemistry" },
+	{ id: "me", name: "Mechanical Engineering" },
+	{ id: "biology", name: "Biology" },
+	{ id: "earth-space", name: "Earth & Space Science" },
+];
+
+/** Degree anchors in world units (the approved mockup, ×100). */
+export const DEGREE_ANCHORS: Readonly<Record<string, WorldPosition>> = {
+	"earth-space": { x: 14000, y: 11000 },
+	math: { x: 32000, y: 27000 },
+	physics: { x: 54000, y: 16000 },
+	chemistry: { x: 80000, y: 9000 },
+	biology: { x: 92000, y: 26000 },
+	ee: { x: 76000, y: 30000 },
+	cs: { x: 64000, y: 47000 },
+	me: { x: 17000, y: 44000 },
+};
+
+const ANCHOR_STRENGTH = 0.08;
+const LINK_DISTANCE = 600;
+const LINK_STRENGTH = 0.3;
+const COLLIDE_RADIUS = 180;
+const CHARGE_STRENGTH = -30;
+const TICKS = 600;
+/** Half-width of the initial jitter square around a topic's anchor. */
+const JITTER = 400;
+
+interface SimNode extends SimulationNodeDatum {
+	id: string;
+	ax: number;
+	ay: number;
+}
+type SimLink = SimulationLinkDatum<SimNode>;
+
+/** FNV-1a string hash → uint32. */
+function hashString(s: string): number {
+	let h = 2166136261;
+	for (let i = 0; i < s.length; i++) {
+		h ^= s.charCodeAt(i);
+		h = Math.imul(h, 16777619);
+	}
+	return h >>> 0;
+}
+
+/** Seeded linear congruential generator (Numerical Recipes constants) → [0,1). */
+function lcg(seed: number): () => number {
+	let s = seed >>> 0;
+	return () => {
+		s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+		return s / 4294967296;
+	};
+}
+
+/** Mean of the anchors of a topic's degrees; unknown degrees are ignored,
+ *  and a topic with no known degree falls back to the centroid of all anchors. */
+function anchorOf(degrees: readonly string[]): WorldPosition {
+	const known = degrees.map((d) => DEGREE_ANCHORS[d]).filter((a): a is WorldPosition => a !== undefined);
+	const list = known.length > 0 ? known : Object.values(DEGREE_ANCHORS);
+	return {
+		x: list.reduce((s, a) => s + a.x, 0) / list.length,
+		y: list.reduce((s, a) => s + a.y, 0) / list.length,
+	};
+}
+
+/**
+ * Lay out the world. Returns the same topics (in order), each with a
+ * `position`; a topic that already had one keeps it exactly. The input is
+ * not mutated.
+ */
+export function layoutWorld(topics: WorldTopic[], seed: number): WorldTopic[] {
+	const nodes: SimNode[] = topics.map((t) => {
+		const a = anchorOf(t.degrees);
+		const rand = lcg(hashString(t.id) ^ (seed >>> 0));
+		const node: SimNode = {
+			id: t.id,
+			ax: a.x,
+			ay: a.y,
+			x: t.position ? t.position.x : a.x + (rand() * 2 - 1) * JITTER,
+			y: t.position ? t.position.y : a.y + (rand() * 2 - 1) * JITTER,
+		};
+		if (t.position) {
+			node.fx = t.position.x;
+			node.fy = t.position.y;
+		}
+		return node;
+	});
+
+	const ids = new Set(nodes.map((n) => n.id));
+	const links: SimLink[] = [];
+	for (const t of topics) {
+		for (const p of t.prereqs) {
+			if (p !== t.id && ids.has(p)) links.push({ source: p, target: t.id });
+		}
+	}
+
+	const sim = forceSimulation<SimNode>(nodes)
+		.randomSource(lcg(seed))
+		.force("x", forceX<SimNode>((d) => d.ax).strength(ANCHOR_STRENGTH))
+		.force("y", forceY<SimNode>((d) => d.ay).strength(ANCHOR_STRENGTH))
+		.force(
+			"link",
+			forceLink<SimNode, SimLink>(links)
+				.id((d) => d.id)
+				.distance(LINK_DISTANCE)
+				.strength(LINK_STRENGTH),
+		)
+		.force("collide", forceCollide<SimNode>(COLLIDE_RADIUS))
+		.force("charge", forceManyBody<SimNode>().strength(CHARGE_STRENGTH))
+		.stop();
+	sim.tick(TICKS);
+
+	return topics.map((t, i) => {
+		if (t.position) return { ...t, position: { x: t.position.x, y: t.position.y } };
+		const n = nodes[i]!;
+		return { ...t, position: { x: n.x ?? n.ax, y: n.y ?? n.ay } };
+	});
+}
