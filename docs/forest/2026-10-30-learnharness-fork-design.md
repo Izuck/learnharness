@@ -236,3 +236,20 @@ How Haiku grading works in teaching (my calls):
   - trail derivation;
   - placement-ledger merging;
   - context assembly order.
+
+## 11. Backend parity (added 31 October 2026)
+
+Isaac saved an Anthropic API key in the app (Settings → Keys) as well as connecting Claude Code. He wants the app to behave the same whichever backend runs it: "usage in the app to not differ between if i use cli or api". The no-API anti-goal (§2) now reads: the API is used only when Isaac picks it. Claude Code (CLI) usage still never touches API credits.
+
+He approved all of these fixes ("Plan all of them"):
+
+- **A. Keep Isaac's personal Claude Code setup out of the tutor.** CLI-backed agents load `~/.claude` user settings. That can bring in plugins, output styles, memory, and his global CLAUDE.md, whose "write math in Unicode" rule contradicts the app's LaTeX. API agents load none of this. Use the most isolated CLI configuration that still signs in with his plan and still reaches the MCP tool bridge.
+- **B. One backend switch.** A single control, "Run on: Claude plan / API key", remaps every model slot and per-role override to the matching model on the other backend. The mapping is `opus ↔ claude-opus-5-5`, `sonnet ↔ claude-sonnet-5-5` and `haiku ↔ claude-haiku-5-5`. The open lesson's model picker gets the same one-click switch. On the CLI, the stats bar shows the concrete model the CLI resolved.
+- **C. One live CLI process per lesson.** Keep the `claude` process alive across ordinary turns, not only while a tool result is pending. A new learner message is then written to stdin instead of replaying the whole lesson as flattened text. Any mismatch (history no longer a prefix, changed configuration, compaction, idle timeout, app restart) falls back to today's full replay.
+- **D. Stream tool calls on the CLI.** Teaching prose (`send_to_user`) and tool cards stream as they are generated, as on the API. Execution still waits for MCP admission, and a previewed call that is never admitted is withdrawn.
+- **E. Same errors.** CLI limit, rate and sign-in errors become the same friendly messages the API path shows. A plan-limit warning appears when the CLI reports one.
+- **F. Comparable usage.** CLI turns show an estimated equivalent API cost ("≈ $x on plan") from the catalog price of the mapped model.
+- **G. Same limits, less overhead.** Raise the CLI output caps to the API model's limits. Run the CLI version check once per server process, not once per launch.
+- **H. Switching backend mid-lesson.** Thinking blocks produced on one backend are dropped when the history is sent to the other, never resent as plain text.
+
+These can't be made equal, and that is accepted: the CLI has no thinking-off, and parallel tool calls arrive one at a time on the CLI.
