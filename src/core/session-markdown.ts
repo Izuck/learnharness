@@ -21,7 +21,7 @@
  */
 
 import type { LhMessage } from "./native-messages.ts";
-import { duplicateDeliveryKeys, hiddenIndexesOf } from "./delivered-duplicates.ts";
+import { duplicateDeliveryKeys, hiddenIndexesOf, type DuplicateDeliveryKeys } from "./delivered-duplicates.ts";
 import {
 	failedOutputCallIds,
 	PRACTICE_CONCLUDE_TOOL,
@@ -44,7 +44,7 @@ export interface MarkdownContext {
 	calls: Map<string, { name: string; args: Record<string, unknown> | undefined }>;
 	failedOutputCalls?: ReadonlySet<string>;
 	/** Text blocks that repeat a delivered send_to_user message (core/delivered-duplicates.ts). */
-	duplicateKeys?: ReadonlySet<string>;
+	duplicateKeys?: DuplicateDeliveryKeys; // callers rendering learner-facing text MUST pass duplicateDeliveryKeys(whole transcript): parity doctrine
 }
 
 function markdownContext(messages: ReadonlyArray<LhMessage>): MarkdownContext {

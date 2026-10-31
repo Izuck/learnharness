@@ -133,7 +133,7 @@ export function projectView(messages: readonly LhMessage[], live?: LiveTurnState
 	const outputErrors = new Map<string, ToolResultMessage>();
 	// A text block that repeats a send_to_user message already delivered this
 	// turn is the same prose twice: render it once (the call's text wins).
-	const duplicates = duplicateDeliveryKeys(messages);
+	const duplicates = duplicateDeliveryKeys(messages, { inFlight: live?.streamingIds });
 	for (const message of messages) {
 		if (message.role === "toolResult" && message.toolName === SEND_TO_USER_TOOL && message.isError) {
 			outputErrors.set(message.toolCallId, message);

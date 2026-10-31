@@ -28,7 +28,7 @@ import type { GraphStore } from "../../core/ports.ts";
 import { emit } from "../../core/events.ts";
 import { settleGraphLayout } from "../../core/layout-settle.ts";
 import { batchRuns, coverageOf, messageViewLines } from "../../core/coverage.ts";
-import { duplicateDeliveryKeys } from "../../core/delivered-duplicates.ts";
+import { duplicateDeliveryKeys, type DuplicateDeliveryKeys } from "../../core/delivered-duplicates.ts";
 import { failedOutputCallIds, type LhMessage } from "../../core/native-messages.ts";
 import { auditorGraphTools } from "../tools/graph.ts";
 import { runSubmitAgent, healStringifiedArrays } from "./submit-agent.ts";
@@ -137,7 +137,7 @@ function proseView(
 	messages: ReadonlyArray<LhMessage>,
 	title?: string,
 	failedOutputCalls: ReadonlySet<string> = failedOutputCallIds(messages),
-	duplicateKeys: ReadonlySet<string> = duplicateDeliveryKeys(messages),
+	duplicateKeys: DuplicateDeliveryKeys = duplicateDeliveryKeys(messages),
 ): string {
 	const lines = messages.flatMap((message) => messageViewLines(message, message.id, failedOutputCalls, duplicateKeys));
 	const head = title && title.length > 0 ? `# ${title}\n\n` : "";

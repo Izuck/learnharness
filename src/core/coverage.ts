@@ -22,7 +22,7 @@
 import { createHash } from "node:crypto";
 
 import type { CoverageEntry } from "./contracts/graph.ts";
-import { duplicateDeliveryKeys, hiddenIndexesOf } from "./delivered-duplicates.ts";
+import { duplicateDeliveryKeys, hiddenIndexesOf, type DuplicateDeliveryKeys } from "./delivered-duplicates.ts";
 import { failedOutputCallIds, userFacingTextOf, type LhMessage } from "./native-messages.ts";
 
 export type { CoverageEntry };
@@ -40,7 +40,7 @@ export function messageViewLines(
 	message: LhMessage,
 	mid: string,
 	failedOutputCalls: ReadonlySet<string> = failedOutputCallIds([message]),
-	duplicateKeys?: ReadonlySet<string>,
+	duplicateKeys?: DuplicateDeliveryKeys, // callers rendering learner-facing text MUST pass duplicateDeliveryKeys(whole transcript): parity doctrine
 ): string[] {
 	const lines: string[] = [];
 	if ((message as { role?: string }).role !== "assistant") return lines;
@@ -83,7 +83,7 @@ export function viewTokens(lines: string[]): number {
 export function messageFingerprint(
 	message: LhMessage,
 	failedOutputCalls?: ReadonlySet<string>,
-	duplicateKeys?: ReadonlySet<string>,
+	duplicateKeys?: DuplicateDeliveryKeys, // callers rendering learner-facing text MUST pass duplicateDeliveryKeys(whole transcript): parity doctrine
 ): string {
 	const h = createHash("sha256");
 	h.update(JSON.stringify([(message as { role?: string }).role, messageViewLines(message, message.id, failedOutputCalls, duplicateKeys)]));

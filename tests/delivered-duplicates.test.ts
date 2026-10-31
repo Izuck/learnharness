@@ -189,3 +189,41 @@ describe("consumers drop the duplicate; the model-facing history keeps it", () =
 		assert.equal(llm.split("The plan:").length - 1, 2, "both copies still go back to the model");
 	});
 });
+
+describe("messages still streaming (prefix rule)", () => {
+	const live = (...ids: string[]) => ({ inFlight: true, streamingIds: new Set(ids), executions: new Map() });
+	const partial = (t: string) => realShape(t);
+
+	it("detector: a streaming partial prefix is hidden, from the first character on", () => {
+		for (const part of ["H", "Here is", "Here is what we will cover.\n\nThe pl", LESSON.slice(0, -1), LESSON]) {
+			assert.deepEqual([...duplicateDeliveryKeys(partial(part), { inFlight: new Set(["m37"]) })], ["m37:0"], part);
+		}
+	});
+
+	it("detector: the same partial is shown when the message is settled (strict equality)", () => {
+		assert.equal(duplicateDeliveryKeys(partial("Here is what we will")).size, 0);
+		assert.equal(duplicateDeliveryKeys(partial("Here is what we will"), { inFlight: new Set(["other"]) }).size, 0);
+	});
+
+	it("detector: a streaming recap that diverges is shown once it diverges", () => {
+		const opts = { inFlight: new Set(["m37"]) };
+		assert.equal(duplicateDeliveryKeys(partial("Here is what"), opts).size, 1, "still a prefix");
+		assert.equal(duplicateDeliveryKeys(partial("Here is what I will recap"), opts).size, 0, "diverged");
+		assert.equal(duplicateDeliveryKeys(partial(`${LESSON} And more.`), opts).size, 0, "a superset is never a duplicate");
+	});
+
+	it("detector: the prefix rule needs a delivered call in the same turn", () => {
+		const opts = { inFlight: new Set(["m37"]) };
+		const failed = [user("u1"), assistant("m35", [send(LESSON)], "toolUse"), ack("send-1", true), assistant("m37", [text("Here is what")])];
+		assert.equal(duplicateDeliveryKeys(failed, opts).size, 0);
+		const prevTurn = [user("u1"), assistant("m35", [send(LESSON)], "toolUse"), ack(), user("u2"), assistant("m37", [text("Here is what")])];
+		assert.equal(duplicateDeliveryKeys(prevTurn, opts).size, 0);
+	});
+
+	it("lesson view: a streaming partial copy is not shown; a diverged recap is; settled unchanged", () => {
+		assert.deepEqual(projectView(partial("Here is what we will"), live("m37")).filter((m) => m.role === "assistant").flatMap((m) => m.parts).filter((p) => p.type === "text").map((p) => p.text), [LESSON]);
+		const diverged = projectView(partial("Here is what I will recap"), live("m37")).filter((m) => m.role === "assistant").flatMap((m) => m.parts).filter((p) => p.type === "text").map((p) => p.text);
+		assert.deepEqual(diverged, [LESSON, "Here is what I will recap"]);
+		assert.deepEqual(viewProse(partial("Here is what we will")), [LESSON, "Here is what we will"], "settled partial text stays visible");
+	});
+});
