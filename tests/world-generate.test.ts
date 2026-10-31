@@ -176,6 +176,75 @@ describe("generateWorld: robustness", () => {
 	});
 });
 
+describe("generateWorld: course lists", () => {
+	const fourDegrees = [
+		{ id: "math", name: "Mathematics" },
+		{ id: "physics", name: "Physics" },
+		{ id: "ee", name: "Electrical Engineering" },
+		{ id: "cs", name: "Computer Science" },
+	];
+
+	it("treats an empty course list as a bad reply: retried once, degree skipped, nothing cached", async () => {
+		let listCalls = 0;
+		const logs: string[] = [];
+		const ask = (async (o: { prompt: string }) => {
+			if (o.prompt.includes("List the courses")) {
+				listCalls++;
+				return { courses: [] };
+			}
+			throw new Error("no topics should be asked");
+		}) as unknown as typeof runClaudeJson;
+		const batches = await generateWorld({ degrees, buildDir, ask, log: (s) => logs.push(s) });
+		assert.equal(listCalls, 2);
+		assert.deepEqual(batches, []);
+		assert.ok(!fs.existsSync(path.join(buildDir, "math", "_courses.json")));
+		assert.ok(logs.some((l) => /skip/i.test(l) && l.includes("Mathematics")));
+	});
+
+	it("does not trust an empty cached course list on resume", async () => {
+		fs.mkdirSync(path.join(buildDir, "math"), { recursive: true });
+		fs.writeFileSync(path.join(buildDir, "math", "_courses.json"), JSON.stringify({ courses: [] }));
+		const calls: Call[] = [];
+		const batches = await generateWorld({ degrees, buildDir, ask: fakeAsk((c) => good(c), calls), log: () => {} });
+		assert.equal(calls.filter((c) => c.kind === "courses").length, 1);
+		assert.deepEqual(batches.map((b) => b.course), ["A", "B"]);
+		const cached = JSON.parse(fs.readFileSync(path.join(buildDir, "math", "_courses.json"), "utf-8"));
+		assert.deepEqual(cached, { courses: ["A", "B"] });
+	});
+
+	it("counts failed course lists toward the 3-in-a-row stop", async () => {
+		const asked: string[] = [];
+		const logs: string[] = [];
+		const ask = (async (o: { prompt: string }) => {
+			asked.push(o.prompt);
+			throw new Error("usage limit reached");
+		}) as unknown as typeof runClaudeJson;
+		const batches = await generateWorld({ degrees: fourDegrees, buildDir, ask, log: (s) => logs.push(s) });
+		assert.deepEqual(batches, []);
+		// Three degrees, two attempts each; the fourth degree is never asked.
+		assert.equal(asked.length, 3 * 2);
+		assert.ok(!asked.some((p) => p.includes("Computer Science")));
+		assert.ok(logs.some((l) => /stopped early/i.test(l) && /resume/i.test(l)));
+	});
+
+	it("a course-list failure adds to a streak of course failures", async () => {
+		const asked: string[] = [];
+		const ask = (async (o: { prompt: string }) => {
+			asked.push(o.prompt);
+			if (o.prompt.includes("List the courses")) {
+				if (o.prompt.includes("Mathematics")) return { courses: ["A", "B"] };
+				throw new Error("usage limit reached");
+			}
+			return { nope: true };
+		}) as unknown as typeof runClaudeJson;
+		const batches = await generateWorld({ degrees: fourDegrees, buildDir, ask, log: () => {} });
+		assert.deepEqual(batches, []);
+		// math list, A ×2, B ×2 (2 failures), physics list ×2 (3rd failure) - stop.
+		assert.equal(asked.length, 1 + 2 + 2 + 2);
+		assert.ok(!asked.some((p) => p.includes("Electrical Engineering")));
+	});
+});
+
 describe("claudeEnv", () => {
 	it("drops ANTHROPIC_API_KEY so the plan, not the API, is billed", () => {
 		assert.deepEqual(claudeEnv({ ANTHROPIC_API_KEY: "x", PATH: "p" }), { PATH: "p" });

@@ -57,8 +57,9 @@ const TOPICS_SCHEMA = {
 
 const COURSES_CACHE = "_courses.json";
 
-/** Stop the run after this many courses in a row fail (retried and still bad
- *  or thrown) - most likely the plan limit; a rerun resumes. */
+/** Stop the run after this many asks in a row fail (a course list or a
+ *  course's topics, retried and still bad or thrown) - most likely the plan
+ *  limit; a rerun resumes. */
 const MAX_CONSECUTIVE_FAILURES = 3;
 
 /** A usable batch: right shape AND at least one topic (an empty list would be
@@ -73,10 +74,13 @@ const readJson = (file: string): unknown => {
 	}
 };
 
+/** A usable course list: at least one non-blank name (an empty list would be
+ *  cached and the degree skipped forever, so a cached empty list reads as absent). */
 const isCoursesReply = (v: unknown): v is { courses: string[] } =>
 	typeof v === "object" &&
 	v !== null &&
 	Array.isArray((v as { courses?: unknown }).courses) &&
+	(v as { courses: unknown[] }).courses.length > 0 &&
 	(v as { courses: unknown[] }).courses.every((c) => typeof c === "string" && c.trim() !== "");
 
 /** Ask up to twice; the first failure (thrown or wrong shape) is retried once. */
@@ -108,6 +112,16 @@ export async function generateWorld(o: {
 	const topicsPrompt = fs.readFileSync(path.join(PROMPTS, "topics.md"), "utf-8");
 	const batches: CourseTopicsBatch[] = [];
 	let failures = 0;
+	/** Record a failed ask; true when the run must stop. */
+	const failed = (): boolean => {
+		failures++;
+		if (failures < MAX_CONSECUTIVE_FAILURES) return false;
+		log(
+			`Stopped early after ${failures} failed requests in a row (plan limit?). ` +
+				"Batches already written are kept; rerun to resume.",
+		);
+		return true;
+	};
 
 	for (const degree of o.degrees) {
 		const dir = path.join(buildDir, degree.id);
@@ -136,8 +150,10 @@ export async function generateWorld(o: {
 			);
 			if (!reply) {
 				log(`${degree.name}: skipped (no usable course list)`);
+				if (failed()) return batches;
 				continue;
 			}
+			failures = 0;
 			courses = [...new Set(reply.courses.map((c) => c.trim()))];
 			fs.writeFileSync(cachePath, JSON.stringify({ courses }), "utf-8");
 		}
@@ -166,14 +182,7 @@ export async function generateWorld(o: {
 			);
 			if (!batch) {
 				log(`${degree.name} / ${course}: skipped`);
-				failures++;
-				if (failures >= MAX_CONSECUTIVE_FAILURES) {
-					log(
-						`Stopped early after ${failures} courses failed in a row (plan limit?). ` +
-							"Batches already written are kept; rerun to resume.",
-					);
-					return batches;
-				}
+				if (failed()) return batches;
 				continue;
 			}
 			failures = 0;
