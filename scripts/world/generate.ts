@@ -9,14 +9,17 @@
  *   npm run world:generate            all degrees
  *   npm run world:generate -- math    only the named degree ids
  *
- * Reads LH_DATA_DIR like the app. Importing this module has no side effects;
- * the run starts only when it is the entry point.
+ * Writes under LH_DATA_DIR like the app; `npm run world:generate` preloads
+ * scripts/default-data-dir.mjs, so an unset LH_DATA_DIR means the app's own
+ * data folder (never the repo's data/). The resolved folder is printed first.
+ * Importing this module has no side effects; the run starts only when it is
+ * the entry point.
  */
 
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { WORLD_FILES } from "../../config.ts";
+import { PATHS, WORLD_FILES } from "../../config.ts";
 import type { CourseTopicsBatch, WorldDegree } from "../../src/core/contracts/world.ts";
 import { carryPositions, isCourseTopicsBatch, mergeDegreeTopics, topicSlug } from "../../src/core/world.ts";
 import { WORLD_DEGREES } from "../../src/core/world-layout.ts";
@@ -225,6 +228,7 @@ function renderReport(
 }
 
 async function main(): Promise<void> {
+	console.log(`Data folder: ${PATHS.data}`);
 	const wanted = process.argv.slice(2);
 	const degrees = wanted.length ? WORLD_DEGREES.filter((d) => wanted.includes(d.id)) : [...WORLD_DEGREES];
 	if (degrees.length === 0) throw new Error(`No known degree in: ${wanted.join(", ")}`);

@@ -3,15 +3,17 @@
 // opens it in its own window, and stops the server when the window closes.
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import "./default-data-dir.mjs"; // sets LH_DATA_DIR to the shared default when unset
+import { serverEnv } from "./launch-env.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const PORT = process.env.PORT || "3000";
 const APP_URL = `http://localhost:${PORT}`;
 const NEXT = path.join(ROOT, "node_modules", "next", "dist", "bin", "next");
-// Every mutable record (chats, graph) lives here, outside the repo, so it survives re-clones and tests never touch it.
-const DATA = process.env.LH_DATA_DIR || path.join(os.homedir(), "Documents", "learnharness-data");
+// Every mutable record (chats, graph, world) lives here, outside the repo (scripts/data-dir.mjs), so it
+// survives re-clones and tests never touch it. The world scripts default to the same folder.
+const DATA = process.env.LH_DATA_DIR;
 const PROFILE = path.join(DATA, ".app-window"); // the window's own browser profile, separate from yours
 
 fs.mkdirSync(DATA, { recursive: true });
@@ -65,7 +67,8 @@ log(`starting (browser: ${browser ?? "default"}, data: ${DATA})`);
 const server = spawn(process.execPath, [NEXT, "dev", "-p", PORT, "-H", "localhost"], {
 	cwd: ROOT,
 	stdio: ["ignore", logFile, logFile],
-	env: { ...process.env, LH_DATA_DIR: DATA, NODE_ENV: "development" },
+	// No ANTHROPIC_API_KEY (the plan, never the API), and the npm-global claude.exe on PATH (launch-env.mjs).
+	env: serverEnv({ ...process.env, LH_DATA_DIR: DATA }),
 	windowsHide: true,
 });
 server.on("exit", (code) => {
