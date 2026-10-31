@@ -11,7 +11,8 @@
  *
  * The rule is deliberately narrow, so nothing real is ever hidden:
  *  - exact equality after trimming and collapsing whitespace runs; a recap,
- *    a summary, a prefix or a superset is NOT a duplicate and stays visible;
+ *    a summary, a prefix or a superset is NOT a duplicate and stays visible
+ *    (the one exception is the message that is streaming right now, below);
  *  - the call must be EARLIER than the text (an earlier message, or an
  *    earlier block of the same message) and in the same turn, where a turn
  *    starts at each `user` message (custom markers are not boundaries);
@@ -19,16 +20,18 @@
  *    or an errored/aborted generation) are retry context, so their text twin
  *    is the only copy the learner gets and stays visible.
  *
- * ONE EXCEPTION, for messages still streaming (`opts.inFlight`): a partial
- * text block is hidden while it is a non-empty PREFIX of a delivered
- * same-turn message. Without it a lesson-length repeat would stream in as a
- * second copy for the whole generation and vanish at the final delta. There
- * is no minimum prefix length: any minimum would let its first characters
- * flash in and then disappear, which is the very flicker being avoided. The
- * cost is that streamed text which happens to start like the delivered
- * message stays hidden until it diverges (then it appears whole) or the
- * message settles (strict equality applies again). Settled messages never
- * use the prefix rule.
+ * THE STREAMING EXCEPTION (`opts.inFlight`): the lesson view passes the id of
+ * the ONE message that is streaming right now. A non-empty text block of that
+ * message is also hidden while it is a PREFIX of a delivered same-turn
+ * message. Without it a lesson-length repeat would stream in as a second copy
+ * for the whole generation and vanish at the final delta. There is no minimum
+ * prefix length: any minimum would let its first characters flash in and then
+ * disappear, which is the very flicker being avoided. The cost is that
+ * streamed text which happens to start like the delivered message stays
+ * hidden until it diverges (then it appears whole) or its message settles
+ * (strict equality applies again). Every other message, including messages
+ * that settled earlier in the same streaming session, uses strict equality;
+ * so do all non-view readers, which never pass `inFlight`.
  */
 
 import { failedOutputCallIds, sendToUserText, type LhMessage } from "./native-messages.ts";
@@ -44,33 +47,57 @@ export function deliveryKey(messageId: string, contentIndex: number): string {
 	return `${messageId}:${contentIndex}`;
 }
 
-/** The hidden blocks as a set of `deliveryKey`s that also remembers them
- *  per message, so consumers never have to parse a key back apart. */
-export class DuplicateDeliveryKeys extends Set<string> {
-	private readonly byMessage = new Map<string, Set<number>>();
+/** The hidden blocks of a transcript: read-only, built only by
+ *  `duplicateDeliveryKeys`. Answers by key (`has`, iteration, `size`) and by
+ *  message (`indexesOf`), so consumers never parse a key back apart. */
+export class DuplicateDeliveryKeys {
+	readonly #byMessage: ReadonlyMap<string, ReadonlySet<number>>;
 
-	record(messageId: string, contentIndex: number): void {
-		this.add(deliveryKey(messageId, contentIndex));
-		let indexes = this.byMessage.get(messageId);
-		if (!indexes) this.byMessage.set(messageId, (indexes = new Set()));
-		indexes.add(contentIndex);
+	constructor(byMessage: ReadonlyMap<string, ReadonlySet<number>>) {
+		this.#byMessage = byMessage;
 	}
 
+	get size(): number {
+		let n = 0;
+		for (const indexes of this.#byMessage.values()) n += indexes.size;
+		return n;
+	}
+
+	has(key: string): boolean {
+		for (const [messageId, indexes] of this.#byMessage) {
+			for (const index of indexes) if (deliveryKey(messageId, index) === key) return true;
+		}
+		return false;
+	}
+
+	*keys(): IterableIterator<string> {
+		for (const [messageId, indexes] of this.#byMessage) {
+			for (const index of indexes) yield deliveryKey(messageId, index);
+		}
+	}
+
+	[Symbol.iterator](): IterableIterator<string> {
+		return this.keys();
+	}
+
+	/** The content indexes of ONE message that are hidden (undefined when none),
+	 *  in the shape userFacingTextOf takes. */
 	indexesOf(messageId: string): ReadonlySet<number> | undefined {
-		return this.byMessage.get(messageId);
+		return this.#byMessage.get(messageId);
 	}
 }
 
 export interface DuplicateDeliveryOptions {
-	/** Ids of messages still streaming (projectView's live.streamingIds):
-	 *  their text blocks are also hidden while a prefix of a delivered message. */
+	/** Ids of the message(s) streaming RIGHT NOW (the lesson view only):
+	 *  see "the streaming exception" in the file header. NOT the consume-scoped
+	 *  streamingIds, which keeps messages that already settled. */
 	inFlight?: ReadonlySet<string>;
 }
 
-/** Keys of assistant `text` blocks that repeat, verbatim up to whitespace,
- *  a send_to_user message delivered earlier in the same turn. */
+/** Text blocks that repeat, verbatim up to whitespace, a send_to_user message
+ *  delivered earlier in the same turn. */
 export function duplicateDeliveryKeys(messages: readonly LhMessage[], opts: DuplicateDeliveryOptions = {}): DuplicateDeliveryKeys {
-	const hidden = new DuplicateDeliveryKeys();
+	const hidden = new Map<string, Set<number>>();
 	const failed = failedOutputCallIds(messages);
 	let delivered = new Set<string>(); // normalized send_to_user messages of the current turn
 	for (const message of messages) {
@@ -90,16 +117,17 @@ export function duplicateDeliveryKeys(messages: readonly LhMessage[], opts: Dupl
 				const text = normalized(block.text);
 				if (text === "") continue;
 				if (delivered.has(text) || (streaming && [...delivered].some((sent) => sent.startsWith(text)))) {
-					hidden.record(message.id, contentIndex);
+					let indexes = hidden.get(message.id);
+					if (!indexes) hidden.set(message.id, (indexes = new Set()));
+					indexes.add(contentIndex);
 				}
 			}
 		}
 	}
-	return hidden;
+	return new DuplicateDeliveryKeys(hidden);
 }
 
-/** The content indexes of ONE message hidden by `keys` (undefined when none),
- *  in the shape userFacingTextOf takes. */
+/** The content indexes of ONE message hidden by `keys` (undefined when none). */
 export function hiddenIndexesOf(message: Pick<LhMessage, "id">, keys: DuplicateDeliveryKeys): ReadonlySet<number> | undefined {
 	return keys.indexesOf(message.id);
 }

@@ -40,7 +40,7 @@ export function messageViewLines(
 	message: LhMessage,
 	mid: string,
 	failedOutputCalls: ReadonlySet<string> = failedOutputCallIds([message]),
-	duplicateKeys?: DuplicateDeliveryKeys, // callers rendering learner-facing text MUST pass duplicateDeliveryKeys(whole transcript): parity doctrine
+	duplicateKeys?: DuplicateDeliveryKeys, // pass the same keys the lesson view uses (duplicateDeliveryKeys of the whole transcript), or this output shows text the learner never saw
 ): string[] {
 	const lines: string[] = [];
 	if ((message as { role?: string }).role !== "assistant") return lines;
@@ -83,7 +83,7 @@ export function viewTokens(lines: string[]): number {
 export function messageFingerprint(
 	message: LhMessage,
 	failedOutputCalls?: ReadonlySet<string>,
-	duplicateKeys?: DuplicateDeliveryKeys, // callers rendering learner-facing text MUST pass duplicateDeliveryKeys(whole transcript): parity doctrine
+	duplicateKeys?: DuplicateDeliveryKeys, // pass the same keys the lesson view uses (duplicateDeliveryKeys of the whole transcript), or this output shows text the learner never saw
 ): string {
 	const h = createHash("sha256");
 	h.update(JSON.stringify([(message as { role?: string }).role, messageViewLines(message, message.id, failedOutputCalls, duplicateKeys)]));

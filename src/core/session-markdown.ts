@@ -44,7 +44,7 @@ export interface MarkdownContext {
 	calls: Map<string, { name: string; args: Record<string, unknown> | undefined }>;
 	failedOutputCalls?: ReadonlySet<string>;
 	/** Text blocks that repeat a delivered send_to_user message (core/delivered-duplicates.ts). */
-	duplicateKeys?: DuplicateDeliveryKeys; // callers rendering learner-facing text MUST pass duplicateDeliveryKeys(whole transcript): parity doctrine
+	duplicateKeys?: DuplicateDeliveryKeys; // pass the same keys the lesson view uses (duplicateDeliveryKeys of the whole transcript), or this output shows text the learner never saw
 }
 
 function markdownContext(messages: ReadonlyArray<LhMessage>): MarkdownContext {

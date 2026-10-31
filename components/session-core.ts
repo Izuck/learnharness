@@ -289,7 +289,7 @@ export class SessionModel {
 	getState(): SessionState {
 		const live =
 			this.statusValue === "submitted" || this.statusValue === "streaming"
-				? { executions: this.executions, inFlight: true, streamingIds: this.streamingIds }
+				? { executions: this.executions, inFlight: true, streamingIds: this.streamingIds, streamingMessageId: this.streamingMessageId }
 				: undefined;
 		const messages = [...this.base, ...this.tail];
 		const latest = failedResponseAtEnd(messages);

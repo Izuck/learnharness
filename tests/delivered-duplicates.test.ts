@@ -191,7 +191,15 @@ describe("consumers drop the duplicate; the model-facing history keeps it", () =
 });
 
 describe("messages still streaming (prefix rule)", () => {
-	const live = (...ids: string[]) => ({ inFlight: true, streamingIds: new Set(ids), executions: new Map() });
+	// streamingIds is consume-scoped (never shrinks on message_end); streamingMessageId is the ONE message streaming right now.
+	const live = (streaming: string | null, ...settledInConsume: string[]) => ({
+		inFlight: true,
+		streamingIds: new Set([...(streaming ? [streaming] : []), ...settledInConsume]),
+		streamingMessageId: streaming,
+		executions: new Map(),
+	});
+	const assistantText = (messages: LhMessage[], state: Parameters<typeof projectView>[1]) =>
+		projectView(messages, state).filter((m) => m.role === "assistant").flatMap((m) => m.parts).filter((p) => p.type === "text").map((p) => p.text);
 	const partial = (t: string) => realShape(t);
 
 	it("detector: a streaming partial prefix is hidden, from the first character on", () => {
@@ -225,5 +233,24 @@ describe("messages still streaming (prefix rule)", () => {
 		const diverged = projectView(partial("Here is what I will recap"), live("m37")).filter((m) => m.role === "assistant").flatMap((m) => m.parts).filter((p) => p.type === "text").map((p) => p.text);
 		assert.deepEqual(diverged, [LESSON, "Here is what I will recap"]);
 		assert.deepEqual(viewProse(partial("Here is what we will")), [LESSON, "Here is what we will"], "settled partial text stays visible");
+	});
+
+	it("lesson view: a settled prefix message sharing streamingIds with the streaming one stays visible", () => {
+		const base = [user("u1"), assistant("m1", [send(LESSON)], "toolUse"), ack()];
+		const messages = [...base, assistant("m2", [text("Here is what")]), assistant("m3", [text("Here is what we will")])];
+		// m2 settled earlier in this consume (still in streamingIds); m3 is streaming now.
+		assert.deepEqual(assistantText(messages, live("m3", "m1", "m2")), [LESSON, "Here is what"], "m3 hidden, m2 shown");
+		// Between messages (no message streaming): the settled prefix text is shown.
+		assert.deepEqual(assistantText(messages, live(null, "m1", "m2", "m3")), [LESSON, "Here is what", "Here is what we will"]);
+		// A caller that does not report the streaming message gets strict equality.
+		const legacy = { inFlight: true, streamingIds: new Set(["m1", "m2", "m3"]), executions: new Map() };
+		assert.deepEqual(assistantText(messages, legacy), [LESSON, "Here is what", "Here is what we will"]);
+	});
+
+	it("empty and whitespace-only streaming text is never hidden", () => {
+		const opts = { inFlight: new Set(["m37"]) };
+		for (const blank of ["", "   ", "\n\t \n"]) {
+			assert.equal(duplicateDeliveryKeys(partial(blank), opts).size, 0, JSON.stringify(blank));
+		}
 	});
 });
