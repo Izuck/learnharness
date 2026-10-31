@@ -21,9 +21,11 @@ import {
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import type { AnthropicEffort } from "@earendil-works/pi-ai/api/anthropic-messages";
+import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.models";
 import { parseStreamingJson, parseToolCallArguments } from "@earendil-works/pi-ai/utils/json-parse";
 
 import { externalCliEnv } from "../../core/auth-env.ts";
+import { toApiModelId } from "../../core/backend-parity.ts";
 import type { LhMessage } from "../../core/native-messages.ts";
 import { ClaudeLaunchError, createClaudeLauncher } from "./launch.ts";
 import { parseCliLine, type CliBlock, type CliEvent, type CliUsage } from "./cli-events.ts";
@@ -682,10 +684,28 @@ function continueLiveProcess(turn: ClaudeTurn, owner: symbol, sessionId: string 
 	return true;
 }
 
-export function toClaudeEnv(): NodeJS.ProcessEnv {
+/** Output cap when the API catalog has no entry for the model. */
+const FALLBACK_MAX_OUTPUT_TOKENS = 128_000;
+/** Tool-result cap per MCP call; the API path has no such trim, so keep it generous. */
+const MAX_MCP_OUTPUT_TOKENS = 50_000;
+
+/** The CLI's own per-reply cap is lower than the API's; hand it the API's number
+ *  for the same model family so the two backends cut off at the same place. */
+function apiOutputCap(model: Model<Api> | undefined): number {
+	const apiId = model ? toApiModelId(model.id) : null;
+	const catalog = ANTHROPIC_MODELS as Record<string, { maxTokens: number } | undefined>;
+	return (apiId ? catalog[apiId]?.maxTokens : undefined) ?? FALLBACK_MAX_OUTPUT_TOKENS;
+}
+
+export function toClaudeEnv(model?: Model<Api>): NodeJS.ProcessEnv {
 	// Preserve native CLI auth/routing, including launch-environment credentials.
 	// Claude Code chooses the account and billing method, not LearnHarness.
-	const env: NodeJS.ProcessEnv = { ...externalCliEnv(), MCP_TOOL_TIMEOUT: String(MCP_TOOL_TIMEOUT_MS) };
+	const env: NodeJS.ProcessEnv = {
+		...externalCliEnv(),
+		MCP_TOOL_TIMEOUT: String(MCP_TOOL_TIMEOUT_MS),
+		CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(apiOutputCap(model)),
+		MAX_MCP_OUTPUT_TOKENS: String(MAX_MCP_OUTPUT_TOKENS),
+	};
 	// This fork bills the signed-in Claude plan, never the API. Windows env names are case-insensitive, so match any casing.
 	for (const name of Object.keys(env)) if (name.toUpperCase() === "ANTHROPIC_API_KEY") delete env[name];
 	return env;
@@ -753,7 +773,7 @@ export function createClaudeCodeStreamFunction(runClaude: RunClaude): StreamFunc
 		const stream = createAssistantMessageEventStream();
 		const turn = new ClaudeTurn(stream, model);
 
-		const env = toClaudeEnv();
+		const env = toClaudeEnv(model);
 		// An existing child must not retain stale authentication/routing after env changes.
 		const configuration = { request: configurationForReuse(model, context, toEffort(options?.reasoning)), env };
 		if (continueLiveProcess(turn, owner, options?.sessionId, configuration, context.messages, options?.signal)) return stream;
