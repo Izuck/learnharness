@@ -198,9 +198,49 @@ describe("world: topicCandidates", () => {
 		const r = topicCandidates("Gauss quadrature exactness degree 2n-1", topics, 2);
 		assert.equal(r[0]?.id, "gaussian-quadrature");
 	});
-	it("returns at most k topics", () => {
-		const r = topicCandidates("quadrature polynomials integration series", topics, 2);
-		assert.ok(r.length <= 2);
+	it("returns exactly k topics when more than k overlap", () => {
+		// All three topics overlap (quadrature/polynomials, integration, series).
+		assert.equal(topicCandidates("quadrature polynomials integration series", topics, 3).length, 3);
+		assert.equal(topicCandidates("quadrature polynomials integration series", topics, 2).length, 2);
+	});
+	it("ranks a topic that overlaps less below one that overlaps more", () => {
+		const r = topicCandidates("piecewise linear integration of periodic functions", topics, 3);
+		// trapezoid: piecewise, linear, integration (scope); fourier: periodic, functions (scope).
+		assert.deepEqual(r.map((t) => t.id), ["trapezoid-rule", "fourier-series"]);
+	});
+	it("ignores filler words: one rare content word beats a pile of shared stopwords", () => {
+		const pool = [
+			mk(
+				"a-heat-contact",
+				"Thermal contact",
+				"how heat flows between these bodies when their surfaces touch, with that also through each other",
+			),
+			mk("pn-junctions", "PN Junctions", "the depletion layer where p-type meets n-type silicon"),
+		];
+		const r = topicCandidates("what happens with depletion between these when their also through that", pool, 2);
+		assert.deepEqual(r.map((t) => t.id), ["pn-junctions"]);
+		assert.deepEqual(topicCandidates("with from that this their which these using between", pool, 5), []);
+	});
+	it("weights rare stems above stems most topics share", () => {
+		const pool = [
+			mk("circuit-analysis", "Circuit analysis", "nodal and mesh methods"),
+			mk("digital-circuits", "Digital circuits", "logic gates"),
+			mk("integrated-circuits", "Integrated circuits", "fabrication on silicon"),
+			mk("circuit-protection", "Circuit protection", "fuses and breakers"),
+			mk("rc-circuits", "RC circuits", "charging capacitors through resistors"),
+			mk("inductors", "Inductors", "magnetic energy stored in coils"),
+		];
+		const r = topicCandidates("circuits with inductors", pool, 6);
+		assert.equal(r[0]?.id, "inductors");
+		assert.equal(r.length, 6);
+	});
+	it("keeps two-letter acronyms like PN as content words", () => {
+		const pool = [mk("diodes", "Diodes", "rectification"), mk("pn-junctions", "PN Junctions", "depletion layer")];
+		assert.deepEqual(topicCandidates("the pn diode is a junction", pool, 2).map((t) => t.id), ["pn-junctions", "diodes"]);
+	});
+	it("weights a name hit above a scope hit", () => {
+		const pool = [mk("a-topic", "Beta", "alpha"), mk("b-topic", "Alpha", "beta")];
+		assert.deepEqual(topicCandidates("alpha", pool, 2).map((t) => t.id), ["b-topic", "a-topic"]);
 	});
 	it("never returns zero-overlap topics", () => {
 		const r = topicCandidates("quadrature", topics, 10);

@@ -167,32 +167,59 @@ export function unplacedNodeIds(
 	return nodeIds.filter((id) => !merged.has(id));
 }
 
-/** Lowercased word stems of 4+ letters, trailing "s" stripped. */
+/** English function words and filler that carry no topic signal. Compared
+ *  against the lowercased word before stemming. */
+const STOPWORDS: ReadonlySet<string> = new Set(
+	(
+		"am an as at be by do he if in is it me my no of on or so to up us we " +
+		"about above after again against all also although among and any are around because been before " +
+		"being below between both but can cannot could did does doing done during each either else even " +
+		"every few for from further had has have having her here hers him his how however into its itself " +
+		"just many may might more most much must nor not now off once one only onto other others our out " +
+		"over own per rather same she should since some such than that the their theirs them then there " +
+		"these they this those though three through thus too two under until upon use used uses using very " +
+		"via was way were what when where whether which while who whom whose why will with within without " +
+		"would yet you your"
+	).split(" "),
+);
+
+/** Lowercased content-word stems of 2+ letters (stopwords dropped; short
+ *  acronyms like PN, RC, DNA, ODE stay), a trailing "s" stripped from words
+ *  longer than 3 letters (not from "-ss"). */
 function stems(text: string): Set<string> {
 	const out = new Set<string>();
 	for (const w of text.toLowerCase().match(/[a-z]+/g) ?? []) {
-		if (w.length < 4) continue;
-		out.add(w.endsWith("s") ? w.slice(0, -1) : w);
+		if (w.length < 2 || STOPWORDS.has(w)) continue;
+		out.add(w.length > 3 && w.endsWith("s") && !w.endsWith("ss") ? w.slice(0, -1) : w);
 	}
 	return out;
 }
 
-/** The (at most k) topics whose name/scope share the most word stems with
- *  `text` — name hits count double. Zero-overlap topics are never returned;
- *  ties break by id. */
+/** The (at most k) topics whose name/scope best match `text` by shared
+ *  content-word stems. Each shared stem scores its rarity over the given
+ *  topics (IDF: ln(1 + N/df), so a stem few topics use outweighs one most
+ *  topics share), doubled when it is in the topic's name rather than only its
+ *  scope. Stopwords never count. Zero-overlap topics are never returned; ties
+ *  break by id. Pure and deterministic. */
 export function topicCandidates(text: string, topics: WorldTopic[], k: number): WorldTopic[] {
 	const query = stems(text);
+	if (query.size === 0 || k <= 0) return [];
+	const indexed = topics.map((topic) => ({ topic, name: stems(topic.name), scope: stems(topic.scope) }));
+	const df = new Map<string, number>();
+	for (const q of query) {
+		let n = 0;
+		for (const t of indexed) if (t.name.has(q) || t.scope.has(q)) n++;
+		df.set(q, n);
+	}
 	const scored: Array<{ topic: WorldTopic; score: number }> = [];
-	for (const topic of topics) {
-		const name = stems(topic.name);
-		const scope = stems(topic.scope);
+	for (const t of indexed) {
 		let score = 0;
-		for (const s of query) {
-			if (name.has(s)) score += 2;
-			else if (scope.has(s)) score += 1;
+		for (const q of query) {
+			const weight = t.name.has(q) ? 2 : t.scope.has(q) ? 1 : 0;
+			if (weight > 0) score += weight * Math.log(1 + indexed.length / df.get(q)!);
 		}
-		if (score > 0) scored.push({ topic, score });
+		if (score > 0) scored.push({ topic: t.topic, score });
 	}
 	scored.sort((a, b) => b.score - a.score || cmp(a.topic.id, b.topic.id));
-	return scored.slice(0, Math.max(0, k)).map((s) => s.topic);
+	return scored.slice(0, k).map((s) => s.topic);
 }
