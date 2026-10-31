@@ -2,7 +2,8 @@
  * World layout (core/world-layout.ts) — the permanent positions of the fixed
  * forest. Properties: every topic gets a finite position, the layout is
  * deterministic, positions already set never move, degrees sit at their
- * anchors, shared topics sit between their degrees, prerequisites stay close.
+ * anchors, shared topics sit between their degrees, prerequisites stay close,
+ * topics of one course cluster.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -24,6 +25,22 @@ const pos = (t: WorldTopic): WorldPosition => {
 	assert.ok(t.position, `${t.id} has no position`);
 	return t.position;
 };
+
+const mean = (xs: number[]): number => xs.reduce((s, x) => s + x, 0) / xs.length;
+
+/** Distances of every unordered pair of single-degree topics in the same degree that pass `keep`. */
+function sameDegreePairs(out: WorldTopic[], keep: (a: WorldTopic, b: WorldTopic) => boolean): number[] {
+	const ds: number[] = [];
+	for (let i = 0; i < out.length; i++) {
+		for (let j = i + 1; j < out.length; j++) {
+			const a = out[i]!;
+			const b = out[j]!;
+			if (a.degrees.length !== 1 || b.degrees.length !== 1 || a.degrees[0] !== b.degrees[0]) continue;
+			if (keep(a, b)) ds.push(dist(pos(a), pos(b)));
+		}
+	}
+	return ds;
+}
 
 /** Small deterministic fixture: `perDegree` topics per degree, chained by
  *  prereqs inside the degree, plus a few cross-degree prereq links. */
@@ -102,26 +119,51 @@ describe("world layout", () => {
 		assert.ok(dist(shared, mid) < dist(shared, b));
 	});
 
-	it("keeps prerequisites closer than random pairs", () => {
-		const out = layoutWorld(fixture(6), 1);
+	it("keeps prerequisites closer than random same-degree pairs", () => {
+		const out = layoutWorld(fixture(12), 1);
 		const byId = new Map(out.map((t) => [t.id, t]));
-		let preSum = 0;
-		let preN = 0;
+		const linked = new Set<string>();
+		const pre: number[] = [];
 		for (const t of out) {
 			for (const p of t.prereqs) {
-				preSum += dist(pos(t), pos(byId.get(p)!));
-				preN++;
+				const other = byId.get(p)!;
+				if (other.degrees[0] !== t.degrees[0]) continue; // same-degree prereqs only
+				pre.push(dist(pos(t), pos(other)));
+				linked.add(`${p}|${t.id}`).add(`${t.id}|${p}`);
 			}
 		}
-		let allSum = 0;
-		let allN = 0;
-		for (let i = 0; i < out.length; i++) {
-			for (let j = i + 1; j < out.length; j++) {
-				allSum += dist(pos(out[i]!), pos(out[j]!));
-				allN++;
+		const same = sameDegreePairs(out, (a, b) => !linked.has(`${a.id}|${b.id}`));
+		assert.ok(pre.length > 0 && same.length > 0);
+		assert.ok(mean(pre) < 0.7 * mean(same), `prereq ${mean(pre)} vs same-degree ${mean(same)}`);
+	});
+
+	it("clusters topics that share a course", () => {
+		// 2 degrees x 6 courses x 10 topics, no prereqs: only the course can pull pairs together.
+		const t: WorldTopic[] = [];
+		for (const d of ["math", "physics"]) {
+			for (let c = 0; c < 6; c++) {
+				for (let i = 0; i < 10; i++) {
+					// ids interleave courses so id order alone does not group them
+					t.push({ ...topic(`${d}-${i}-${c}`, [d]), courses: [`${d} course ${c}`] });
+				}
 			}
 		}
-		assert.ok(preN > 0);
-		assert.ok(preSum / preN < allSum / allN);
+		const out = layoutWorld(t, 1);
+		const sameCourse = sameDegreePairs(out, (a, b) => a.courses[0] === b.courses[0]);
+		const otherCourse = sameDegreePairs(out, (a, b) => a.courses[0] !== b.courses[0]);
+		assert.ok(
+			mean(sameCourse) < 0.7 * mean(otherCourse),
+			`same course ${mean(sameCourse)} vs other course ${mean(otherCourse)}`,
+		);
+	});
+
+	it("the course pull is deterministic and never moves pinned positions", () => {
+		const calc = ["a", "b", "c"].map((id) => ({ ...topic(id, ["math"]), courses: ["Calc", "Analysis"] }));
+		assert.deepEqual(layoutWorld(calc, 7), layoutWorld(calc, 7));
+		const first = layoutWorld(calc, 7);
+		const added = [...first, { ...topic("d", ["math"]), courses: ["Calc"] }];
+		const second = layoutWorld(added, 7);
+		for (let i = 0; i < 3; i++) assert.deepEqual(second[i]!.position, first[i]!.position);
+		assert.ok(Number.isFinite(pos(second[3]!).x));
 	});
 });
