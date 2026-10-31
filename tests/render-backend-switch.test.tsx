@@ -14,9 +14,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createRoot, type Root } from "react-dom/client";
 import { parseHTML } from "linkedom";
 import { AgentSection } from "../components/settings/agent-section.tsx";
-import { BackendSegments } from "../components/settings/backend-switch.tsx";
+import { BackendSegments, BackendSwitchRow } from "../components/settings/backend-switch.tsx";
 import { ModelControl } from "../components/model-picker.tsx";
-import type { ModelsSettings } from "../src/core/index.ts";
+import { BACKEND_UNAVAILABLE_REASON, NO_CLAUDE_PIN_HINT, unavailableBackends, type ModelsSettings } from "../src/core/index.ts";
 
 const noop = () => {};
 const section = (models: ModelsSettings | undefined) =>
@@ -57,6 +57,30 @@ describe("the Run on control", () => {
 		assert.match(tagOf(html, "backend-anthropic"), /aria-checked="false"/);
 	});
 
+	it("reads the backend from role overrides alone", () => {
+		const html = renderToStaticMarkup(
+			<AgentSection agent={{ models: { researcher: pin("claude-code", "sonnet") } }} models={undefined} graph={undefined} compaction={undefined} onSectionChange={noop} onModelsChange={noop} onCompactionChange={noop} />,
+		);
+		assert.match(tagOf(html, "backend-claude-code"), /aria-checked="true"/);
+		assert.match(tagOf(html, "backend-anthropic"), /aria-checked="false"/);
+	});
+
+	it("disables an unavailable backend and shows its reason beneath", () => {
+		const html = renderToStaticMarkup(
+			<BackendSegments current="anthropic" unmapped={[]} unavailable={{ "claude-code": BACKEND_UNAVAILABLE_REASON["claude-code"] }} onSwitch={noop} />,
+		);
+		assert.match(tagOf(html, "backend-claude-code"), /disabled/);
+		assert.doesNotMatch(tagOf(html, "backend-anthropic"), /disabled/);
+		assert.match(html, /data-testid="backend-unavailable"[^>]*>Claude Code isn.{1,6}t enabled or installed\. Turn it on in Settings/);
+		assert.ok(!renderToStaticMarkup(<BackendSegments current="anthropic" unmapped={[]} unavailable={{}} onSwitch={noop} />).includes("backend-unavailable"));
+	});
+
+	it("derives unavailability from the catalog's keyPresent, treating an unloaded catalog as available", () => {
+		assert.deepEqual(unavailableBackends(undefined), {});
+		assert.deepEqual(unavailableBackends([{ id: "claude-code", keyPresent: false }, { id: "anthropic", keyPresent: true }]), { "claude-code": BACKEND_UNAVAILABLE_REASON["claude-code"] });
+		assert.deepEqual(unavailableBackends([{ id: "anthropic", keyPresent: false }]), { anthropic: BACKEND_UNAVAILABLE_REASON.anthropic });
+	});
+
 	it("lists the pins that could not be mapped in a note", () => {
 		const html = renderToStaticMarkup(
 			<BackendSegments current="anthropic" unmapped={["strong: claude-fable-5-1"]} onSwitch={noop} />,
@@ -82,9 +106,9 @@ let root: Root | undefined, host: HTMLDivElement | undefined;
 afterEach(async () => { await act(async () => root?.unmount()); host?.remove(); root = undefined; globalThis.fetch = originalFetch; });
 
 describe("the open lesson's switch", () => {
-	async function mount(session: { provider: string; id: string }, puts: unknown[]) {
+	async function mount(session: { provider: string; id: string }, puts: unknown[], providers: { id: string; envVar: string; keyPresent: boolean }[] = []) {
 		globalThis.fetch = (async (url, init) => {
-			if (url === "/api/models") return Response.json({ models: [], providers: [], slots: { strong: null, cheap: null, vision: null }, defaults: null, rolePins: {} });
+			if (url === "/api/models") return Response.json({ models: [], providers, slots: { strong: null, cheap: null, vision: null }, defaults: null, rolePins: {} });
 			if (url === "/api/settings") return Response.json({ settings: { models: {} } });
 			if (url === "/api/chats/lesson-1") return Response.json({ settings: { model: session, thinkingLevel: "high" } });
 			if (url === "/api/chats/lesson-1/settings" && init?.method === "PUT") {
@@ -118,11 +142,67 @@ describe("the open lesson's switch", () => {
 		assert.deepEqual(puts, [{ model: { provider: "claude-code", id: "sonnet" }, thinkingLevel: "high" }]);
 	});
 
+	it("disables the switch with the reason when the target backend is unavailable", async () => {
+		const puts: unknown[] = [];
+		await mount({ provider: "claude-code", id: "opus" }, puts, [{ id: "anthropic", envVar: "ANTHROPIC_API_KEY", keyPresent: false }, { id: "claude-code", envVar: "", keyPresent: true }]);
+		const button = document.querySelector<HTMLButtonElement>('[data-testid="switch-lesson-backend"]');
+		assert.ok(button?.disabled, "disabled");
+		assert.equal(document.querySelector('[data-testid="switch-lesson-unavailable"]')?.textContent, BACKEND_UNAVAILABLE_REASON.anthropic);
+		await act(async () => button!.click());
+		assert.deepEqual(puts, []);
+	});
+
 	it("offers nothing for another provider or an unmappable Claude id", async () => {
 		await mount({ provider: "openrouter", id: "z-ai/glm-5.3-flash" }, []);
 		assert.equal(document.querySelector('[data-testid="switch-lesson-backend"]'), null);
 		await act(async () => root?.unmount()); host?.remove();
 		await mount({ provider: "anthropic", id: "claude-fable-5-1" }, []);
 		assert.equal(document.querySelector('[data-testid="switch-lesson-backend"]'), null);
+	});
+});
+
+// ─── the row's behaviour ─────────────────────────────────────────────────────
+
+describe("the Run on row", () => {
+	it("says so, and calls nothing, when no Claude model is pinned", async () => {
+		const calls: string[] = [];
+		globalThis.fetch = (async (url) => { calls.push(String(url)); return Response.json({}); }) as typeof fetch;
+		host = document.createElement("div"); document.body.append(host); root = createRoot(host);
+		await act(async () => root!.render(<BackendSwitchRow record={{}} unavailable={{}} />));
+		assert.equal(document.querySelector('[data-testid="backend-notice"]'), null);
+		await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="backend-anthropic"]')!.click());
+		assert.equal(document.querySelector('[data-testid="backend-notice"]')?.textContent, NO_CLAUDE_PIN_HINT);
+		assert.deepEqual(calls, []);
+	});
+
+	it("an unavailable option is disabled with its reason and never posts", async () => {
+		const calls: string[] = [];
+		globalThis.fetch = (async (url) => { calls.push(String(url)); return Response.json({}); }) as typeof fetch;
+		host = document.createElement("div"); document.body.append(host); root = createRoot(host);
+		const record = { models: { strong: pin("anthropic", "claude-opus-5-5") } };
+		await act(async () => root!.render(<BackendSwitchRow record={record} unavailable={unavailableBackends([{ id: "claude-code", keyPresent: false }])} />));
+		const option = document.querySelector<HTMLButtonElement>('[data-testid="backend-claude-code"]')!;
+		assert.ok(option.disabled);
+		await act(async () => option.click());
+		assert.deepEqual(calls, []);
+		assert.equal(document.querySelector('[data-testid="backend-unavailable"]')?.textContent, BACKEND_UNAVAILABLE_REASON["claude-code"]);
+	});
+
+	it("Agent settings disable the backend the catalog says is unavailable", async () => {
+		globalThis.fetch = (async (url) => {
+			if (url === "/api/models") return Response.json({ models: [], providers: [{ id: "claude-code", envVar: "", keyPresent: false }, { id: "anthropic", envVar: "ANTHROPIC_API_KEY", keyPresent: true }], slots: { strong: null, cheap: null, vision: null }, defaults: null, rolePins: {} });
+			if (String(url).startsWith("/api/settings/prompts")) return Response.json({ prober: [], teacher: [] });
+			if (url === "/api/keys") return Response.json({ keys: [] });
+			if (url === "/api/search") return Response.json({ available: false, engine: null, reason: "" });
+			throw new Error("unexpected request " + String(url));
+		}) as typeof fetch;
+		host = document.createElement("div"); document.body.append(host); root = createRoot(host);
+		await act(async () => root!.render(
+			<AgentSection agent={undefined} models={{ strong: pin("anthropic", "claude-opus-5-5") }} graph={undefined} compaction={undefined} onSectionChange={noop} onModelsChange={noop} onCompactionChange={noop} />,
+		));
+		await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+		assert.ok(document.querySelector<HTMLButtonElement>('[data-testid="backend-claude-code"]')!.disabled);
+		assert.ok(!document.querySelector<HTMLButtonElement>('[data-testid="backend-anthropic"]')!.disabled);
+		assert.equal(document.querySelector('[data-testid="backend-unavailable"]')?.textContent, BACKEND_UNAVAILABLE_REASON["claude-code"]);
 	});
 });

@@ -8,9 +8,11 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { after, afterEach, describe, it } from "node:test";
-import { SETTINGS_FILE } from "../config.ts";
+import os from "node:os";
+import { delimiter } from "node:path";
+import { after, afterEach, before, describe, it } from "node:test";
 import {
+	BACKEND_UNAVAILABLE_REASON,
 	CLI_TO_API,
 	backendOf,
 	currentBackend,
@@ -20,6 +22,14 @@ import {
 	toCliModelId,
 } from "../src/core/backend-parity.ts";
 import type { UserSettings } from "../src/core/settings.ts";
+
+// An empty auth store for this process: the route's availability check reads
+// the real key seam, and a developer machine's saved Anthropic key must not
+// decide the "no key" refusal. Set before config.ts is evaluated.
+const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-backend-auth-"));
+process.env.LH_AUTH_FILE = path.join(authDir, "auth.json");
+fs.writeFileSync(process.env.LH_AUTH_FILE, "{}");
+const { SETTINGS_FILE } = await import("../config.ts");
 
 describe("model id mapping", () => {
 	it("round-trips opus, sonnet and haiku both ways", () => {
@@ -143,6 +153,14 @@ describe("currentBackend", () => {
 		assert.equal(currentBackend({ version: 1, models: { strong: slot("claude-code", "opus"), cheap: slot("anthropic", "claude-haiku-5-5") } }), "mixed");
 		assert.equal(currentBackend({ version: 1, models: { strong: slot("claude-code", "opus") }, agent: { models: { placer: slot("anthropic", "claude-haiku-5-5") } } }), "mixed");
 	});
+	it("votes from role overrides alone, when no slot is pinned", () => {
+		assert.equal(currentBackend({ version: 1, agent: { models: { researcher: slot("claude-code", "sonnet") } } }), "claude-code");
+		assert.equal(currentBackend({ version: 1, agent: { models: { researcher: slot("claude-code", "sonnet"), placer: slot("anthropic", "claude-haiku-5-5") } } }), "mixed");
+		const { record, unmapped } = remapSettings({ version: 1, agent: { models: { researcher: slot("claude-code", "sonnet") } } }, "anthropic");
+		assert.deepEqual(unmapped, []);
+		assert.equal(record.models, undefined, "no slots are invented");
+		assert.deepEqual(record.agent?.models?.researcher, slot("anthropic", "claude-sonnet-5-5"));
+	});
 	it("is null when no Anthropic pin exists", () => {
 		assert.equal(currentBackend({ version: 1 }), null);
 		assert.equal(currentBackend({ version: 1, models: { strong: slot("openrouter", "x") } }), null);
@@ -160,6 +178,7 @@ try {
 	/* nothing to snapshot */
 }
 after(() => {
+	fs.rmSync(authDir, { recursive: true, force: true });
 	if (hadSettings) fs.writeFileSync(SETTINGS_FILE, savedSettings, "utf-8");
 	else fs.rmSync(SETTINGS_FILE, { force: true });
 });
@@ -174,6 +193,24 @@ function seed(record: unknown): void {
 const readBack = () => JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf-8")) as UserSettings;
 
 describe("POST /api/settings/backend", () => {
+	const KEY_VAR = "ANTHROPIC_API_KEY";
+	const savedKey = process.env[KEY_VAR];
+	const savedPath = process.env.PATH;
+	let binDir = "";
+	/** The two backends available: a (never executed) claude binary on PATH,
+	 *  CLI opt-in in the seeded record, and an Anthropic key in the env. */
+	const available = { claudeCode: { enabled: true } };
+	before(() => {
+		binDir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-backend-bin-"));
+		fs.writeFileSync(path.join(binDir, process.platform === "win32" ? "claude.exe" : "claude"), "", { mode: 0o755 });
+		process.env.PATH = `${binDir}${delimiter}${savedPath ?? ""}`;
+		process.env[KEY_VAR] = "sk-ant-test-fixture";
+	});
+	after(() => {
+		if (savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath;
+		if (savedKey === undefined) delete process.env[KEY_VAR]; else process.env[KEY_VAR] = savedKey;
+		fs.rmSync(binDir, { recursive: true, force: true });
+	});
 	const post = async (body: unknown) => {
 		const { POST } = await import("../app/api/settings/backend/route.ts");
 		return POST(new Request("http://t/api/settings/backend", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
@@ -182,6 +219,7 @@ describe("POST /api/settings/backend", () => {
 	it("remaps the stored slots and role overrides through the settings store", async () => {
 		seed({
 			version: 1,
+			...available,
 			graph: { enabled: false },
 			models: {
 				strong: { model: { provider: "claude-code", id: "opus" } },
@@ -201,7 +239,7 @@ describe("POST /api/settings/backend", () => {
 	});
 
 	it("reports unmapped ids and works with no record at all", async () => {
-		seed({ version: 1, models: { strong: { model: { provider: "anthropic", id: "claude-fable-5-1" } } } });
+		seed({ version: 1, ...available, models: { strong: { model: { provider: "anthropic", id: "claude-fable-5-1" } } } });
 		const res = await post({ to: "claude-code" });
 		assert.deepEqual(((await res.json()) as { unmapped: string[] }).unmapped, ["strong: claude-fable-5-1"]);
 		fs.rmSync(SETTINGS_FILE, { force: true });
@@ -209,11 +247,33 @@ describe("POST /api/settings/backend", () => {
 	});
 
 	it("clamps a pinned thinking level to the new model", async () => {
-		seed({ version: 1, models: { cheap: { model: { provider: "claude-code", id: "opus" }, thinkingLevel: "minimal" } } });
+		seed({ version: 1, ...available, models: { cheap: { model: { provider: "claude-code", id: "opus" }, thinkingLevel: "minimal" } } });
 		await post({ to: "anthropic" });
 		// API Opus has no "minimal": it lands on the nearest supported level.
 		assert.equal(readBack().models?.cheap?.thinkingLevel, "low");
 	});
+
+	it("refuses Claude plan with 409 and a plain reason when the CLI is not enabled, leaving the record alone", async () => {
+		const before = { version: 1, models: { strong: { model: { provider: "anthropic", id: "claude-opus-5-5" } } } };
+		seed(before); // no claudeCode opt-in
+		const res = await post({ to: "claude-code" });
+		assert.equal(res.status, 409);
+		assert.equal(((await res.json()) as { error: string }).error, BACKEND_UNAVAILABLE_REASON["claude-code"]);
+		assert.deepEqual(readBack(), before);
+	});
+
+	it("refuses API key with 409 and a plain reason when no Anthropic key is saved, leaving the record alone", async (t) => {
+		const present = process.env[KEY_VAR];
+		delete process.env[KEY_VAR];
+		t.after(() => { process.env[KEY_VAR] = present; });
+		const before = { version: 1, ...available, models: { strong: { model: { provider: "claude-code", id: "opus" } } } };
+		seed(before);
+		const res = await post({ to: "anthropic" });
+		assert.equal(res.status, 409);
+		assert.equal(((await res.json()) as { error: string }).error, BACKEND_UNAVAILABLE_REASON.anthropic);
+		assert.deepEqual(readBack(), before);
+	});
+
 	it("rejects a bad body", async () => {
 		assert.equal((await post({ to: "openrouter" })).status, 400);
 		assert.equal((await post(null)).status, 400);

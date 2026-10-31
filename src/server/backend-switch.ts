@@ -9,10 +9,19 @@
  * model swap).
  */
 
-import { BACKGROUND_MODEL_ROLES, MODEL_SLOTS, type Backend, type ModelSlot, type RoleModelOverride, remapSettings } from "../core";
+import { BACKEND_UNAVAILABLE_REASON, BACKGROUND_MODEL_ROLES, MODEL_SLOTS, type Backend, type ModelSlot, type RoleModelOverride, remapSettings } from "../core";
 import type { UserSettings } from "../core/settings.ts";
 import { clampLevelFor } from "./model-catalog.ts";
 import { settingsStore } from "../store/settings.ts";
+import { providerKeyPresent } from "./keys.ts";
+
+/** The target backend cannot run right now (CLI off / no API key). */
+export class BackendUnavailableError extends Error {
+	constructor(readonly backend: Backend) {
+		super(BACKEND_UNAVAILABLE_REASON[backend]);
+		this.name = "BackendUnavailableError";
+	}
+}
 
 function clampEntry<T extends ModelSlot | RoleModelOverride>(entry: T): T {
 	if (!entry.model || entry.thinkingLevel === undefined) return entry;
@@ -21,8 +30,13 @@ function clampEntry<T extends ModelSlot | RoleModelOverride>(entry: T): T {
 }
 
 /** Switch every Anthropic pin to `to`. Returns what could not be mapped
- *  ("<where>: <id>"); those pins stay as they were. */
+ *  ("<where>: <id>"); those pins stay as they were. Throws
+ *  BackendUnavailableError, writing nothing, when `to` cannot run: the same
+ *  availability the catalog reports as providers[].keyPresent (the CLI is
+ *  opted in and installed / an Anthropic key is saved), so the switch never
+ *  writes pins that every new session and background job would refuse. */
 export function switchBackend(to: Backend): { unmapped: string[] } {
+	if (!providerKeyPresent(to)) throw new BackendUnavailableError(to);
 	const before: UserSettings = settingsStore.readSettings() ?? { version: 1 };
 	const { record, unmapped } = remapSettings(before, to);
 	// Clamp only the entries the remap actually moved.

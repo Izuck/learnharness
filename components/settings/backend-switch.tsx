@@ -12,7 +12,7 @@
 
 import { useState } from "react";
 import { notifySettingsSaved } from "@/components/settings-signal";
-import { currentBackend, type Backend, type UserSettings } from "@/src/core";
+import { NO_CLAUDE_PIN_HINT, currentBackend, type Backend, type UserSettings } from "@/src/core";
 import { cn } from "@/lib/utils";
 import { SettingsRow } from "./controls.tsx";
 
@@ -28,12 +28,18 @@ const LABEL: Record<Backend, string> = { "claude-code": "Claude plan", anthropic
 export function BackendSegments({
 	current,
 	unmapped,
+	unavailable = {},
+	notice,
 	busy,
 	error,
 	onSwitch,
 }: {
 	current: Backend | "mixed" | null;
 	unmapped: readonly string[];
+	/** Backends that cannot run, with the reason shown beneath (their option is disabled). */
+	unavailable?: Partial<Record<Backend, string>>;
+	/** A short hint line (nothing pinned to move). */
+	notice?: string | null;
 	busy?: boolean;
 	error?: string | null;
 	onSwitch: (to: Backend) => void;
@@ -62,7 +68,7 @@ export function BackendSegments({
 									type="button"
 									role="radio"
 									aria-checked={active}
-									disabled={busy}
+									disabled={busy || unavailable[backend] !== undefined}
 									data-testid={`backend-${backend}`}
 									onClick={() => {
 										if (!active) onSwitch(backend);
@@ -78,6 +84,14 @@ export function BackendSegments({
 						})}
 					</div>
 				</div>
+				{OPTIONS.map(({ backend }) =>
+					unavailable[backend] === undefined ? null : (
+						<p key={backend} data-testid="backend-unavailable" className="max-w-72 text-right text-xs text-muted-foreground/70">
+							{unavailable[backend]}
+						</p>
+					),
+				)}
+				{notice && <p data-testid="backend-notice" className="max-w-72 text-right text-xs text-muted-foreground/70">{notice}</p>}
 				{unmapped.length > 0 && (
 					<p data-testid="backend-unmapped" className="max-w-72 text-right text-xs text-muted-foreground/70">
 						No equivalent model, left as it was: {unmapped.join(", ")}
@@ -93,18 +107,30 @@ export function BackendSegments({
  *  dialog's mirror, and tells every other settings reader to re-read. */
 export function BackendSwitchRow({
 	record,
+	unavailable,
 	onSwitched,
 }: {
 	/** The slices the current backend derives from. */
 	record: Pick<UserSettings, "models" | "agent">;
+	/** Backends the catalog says cannot run (reason per backend). */
+	unavailable?: Partial<Record<Backend, string>>;
 	/** The stored record the route answered with (the dialog's mirror). */
 	onSwitched?: (settings: UserSettings) => void;
 }) {
 	const [unmapped, setUnmapped] = useState<string[]>([]);
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
+	const [notice, setNotice] = useState<string | null>(null);
+	const current = currentBackend({ version: 1, ...record });
 
 	async function switchTo(to: Backend) {
+		setNotice(null);
+		// Nothing pinned to either backend: the switch would change nothing,
+		// so say so instead of failing silently.
+		if (current === null) {
+			setNotice(NO_CLAUDE_PIN_HINT);
+			return;
+		}
 		setBusy(true);
 		setError(null);
 		try {
@@ -132,8 +158,10 @@ export function BackendSwitchRow({
 
 	return (
 		<BackendSegments
-			current={currentBackend({ version: 1, ...record })}
+			current={current}
 			unmapped={unmapped}
+			unavailable={unavailable}
+			notice={notice}
 			busy={busy}
 			error={error}
 			onSwitch={(to) => void switchTo(to)}

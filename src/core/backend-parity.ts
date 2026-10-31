@@ -120,3 +120,27 @@ export function currentBackend(record: UserSettings): Backend | "mixed" | null {
 	if (seen.size > 1) return "mixed";
 	return seen.values().next().value ?? null;
 }
+
+/** Why a backend cannot be switched to (plain words, shown beside the control
+ *  and returned by the switch route's 409). */
+export const BACKEND_UNAVAILABLE_REASON: Readonly<Record<Backend, string>> = {
+	"claude-code": "Claude Code isn't enabled or installed. Turn it on in Settings → Providers.",
+	anthropic: "No Anthropic API key is saved. Add one in Settings → Keys.",
+};
+
+/** The empty-record hint: the switch has no pin to move. */
+export const NO_CLAUDE_PIN_HINT = "No Claude model is pinned yet — pick one in the slots below.";
+
+/** Which backends the catalog says cannot run, with their reasons: a
+ *  provider row with keyPresent false (the CLI not opted in / installed, no
+ *  Anthropic key). An unloaded catalog (undefined) or a missing row means
+ *  "unknown", treated as available - the server refuses honestly anyway. */
+export function unavailableBackends(
+	providers: readonly { id: string; keyPresent: boolean }[] | undefined,
+): Partial<Record<Backend, string>> {
+	const out: Partial<Record<Backend, string>> = {};
+	for (const backend of ["claude-code", "anthropic"] as const) {
+		if (providers?.some((p) => p.id === backend && !p.keyPresent)) out[backend] = BACKEND_UNAVAILABLE_REASON[backend];
+	}
+	return out;
+}

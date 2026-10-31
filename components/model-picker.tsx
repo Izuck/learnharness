@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { backendOf, remapSpec, type Backend, type ChatSettings, type ModelCatalogEntry, type ModelCatalogResponse, type ModelsSettings, type UserSettings } from "@/src/core";
+import { backendOf, remapSpec, unavailableBackends, type Backend, type ChatSettings, type ModelCatalogEntry, type ModelCatalogResponse, type ModelsSettings, type UserSettings } from "@/src/core";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { prettyModel } from "@/components/usage-format";
 import { ModelMenuList, ThinkingMenuList } from "@/components/settings/model-menu";
@@ -259,8 +259,9 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 		otherBackend && effectiveProvider && effectiveId
 			? remapSpec({ provider: effectiveProvider, id: effectiveId }, otherBackend)
 			: null;
+	const lessonUnavailable = otherBackend ? unavailableBackends(catalog?.providers)[otherBackend] : undefined;
 	const switchLesson = () => {
-		if (!lessonSwitch?.changed) return;
+		if (!lessonSwitch?.changed || lessonUnavailable) return;
 		const { provider, id } = lessonSwitch.spec;
 		const target = catalog?.models.find((m) => m.provider === provider && m.id === id);
 		apply(provider, id, storedLevel ?? (target ? defaultOrderLevel(target.supportedLevels) : undefined));
@@ -374,11 +375,15 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 						<button
 							type="button"
 							data-testid="switch-lesson-backend"
+							disabled={lessonUnavailable !== undefined}
 							onClick={switchLesson}
-							className="mt-1 rounded-lg px-2 py-1.5 text-left text-muted-foreground transition-colors hover:bg-muted hover:text-card-foreground"
+							className="mt-1 rounded-lg px-2 py-1.5 text-left text-muted-foreground transition-colors enabled:hover:bg-muted enabled:hover:text-card-foreground disabled:cursor-not-allowed disabled:opacity-60"
 						>
 							Switch this lesson to {otherBackend === "anthropic" ? "API key" : "Claude plan"}
 						</button>
+					)}
+					{lessonSwitch?.changed && lessonUnavailable && (
+						<p data-testid="switch-lesson-unavailable" className="px-2 pb-1 text-muted-foreground/70">{lessonUnavailable}</p>
 					)}
 				</MenuShell>
 			)}

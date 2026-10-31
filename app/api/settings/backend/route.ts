@@ -1,5 +1,5 @@
 import type { Backend } from "@/src/core";
-import { readSettingsRecord, switchBackend } from "@/src/server";
+import { BackendUnavailableError, readSettingsRecord, switchBackend } from "@/src/server";
 
 export const dynamic = "force-dynamic";
 
@@ -11,6 +11,8 @@ export const dynamic = "force-dynamic";
  * settings store, thinking levels clamped to the new models. Returns
  * `{ unmapped, settings }`: the pins that had no counterpart and stayed, and
  * the stored record (server truth for the settings dialog's mirror).
+ * 409 {error} when the target backend is unavailable (CLI not enabled or
+ * installed / no Anthropic key saved); nothing is written then.
  * Per-session models are NOT touched - an open lesson has its own switch
  * (the per-chat settings route).
  */
@@ -20,6 +22,11 @@ export async function POST(request: Request) {
 	if (to !== "claude-code" && to !== "anthropic") {
 		return Response.json({ error: 'to must be "claude-code" or "anthropic"' }, { status: 400 });
 	}
-	const { unmapped } = switchBackend(to as Backend);
-	return Response.json({ unmapped, settings: readSettingsRecord() });
+	try {
+		const { unmapped } = switchBackend(to as Backend);
+		return Response.json({ unmapped, settings: readSettingsRecord() });
+	} catch (error) {
+		if (error instanceof BackendUnavailableError) return Response.json({ error: error.message }, { status: 409 });
+		throw error;
+	}
 }

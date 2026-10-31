@@ -62,6 +62,7 @@ import {
 	COMPACTION_THRESHOLD_FLOOR,
 	MODEL_SLOTS,
 	resolveSettings,
+	unavailableBackends,
 	type AgentSettings,
 	type CompactionSettings,
 	type GraphSettings,
@@ -588,7 +589,7 @@ export function AgentSection({
 			<SettingsGroup label="Models" testid="group-models">
 				{catalogFailed && <p role="alert" className="text-xs text-red-400">Model catalog could not be loaded. Check the connection and retry. <button type="button" className="underline" onClick={refreshCatalog}>Retry</button></p>}
 				{/* The one backend switch (forest spec B): above the slots it rewrites. */}
-				<BackendSwitchRow record={{ models, agent }} onSwitched={onBackendSwitched} />
+				<BackendSwitchRow record={{ models, agent }} unavailable={unavailableBackends(body?.providers)} onSwitched={onBackendSwitched} />
 				{MODEL_SLOTS.map((slot) => {
 					const override = models?.[slot];
 					const modelId = override?.model?.id ?? "";
