@@ -36,6 +36,7 @@ import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai"
 import type { LhMarkerMessage, LhMessage } from "./native-messages.ts";
 import { modelSolutionForConclude, PRACTICE_CONCLUDE_TOOL, problemInputForConclude, SEND_TO_USER_TOOL, sendToUserText } from "./native-messages.ts";
 import { activeCompactionOf, type CompactionDetails } from "./compaction.ts";
+import { deliveryKey, duplicateDeliveryKeys } from "./delivered-duplicates.ts";
 import { QUESTION_TOOLS } from "./pending.ts";
 import type { SubagentArtifactData, SubagentResultMeta } from "./contracts/jobs.ts";
 import type { PlanBlockData } from "./contracts/chat.ts";
@@ -130,6 +131,9 @@ export function projectView(messages: readonly LhMessage[], live?: LiveTurnState
 	// Output calls become text rather than tool parts, so read settled
 	// failures up front: a failed call must retain the normal error path.
 	const outputErrors = new Map<string, ToolResultMessage>();
+	// A text block that repeats a send_to_user message already delivered this
+	// turn is the same prose twice: render it once (the call's text wins).
+	const duplicates = duplicateDeliveryKeys(messages);
 	for (const message of messages) {
 		if (message.role === "toolResult" && message.toolName === SEND_TO_USER_TOOL && message.isError) {
 			outputErrors.set(message.toolCallId, message);
@@ -224,7 +228,9 @@ export function projectView(messages: readonly LhMessage[], live?: LiveTurnState
 			const streamingMessage = live?.streamingIds.has(m.id) === true;
 			for (const [contentIndex, block] of assistant.content.entries()) {
 				if (block.type === "text") {
-					rest.push({ type: "text", id: `${m.id}-t${textN++}`, text: block.text, state: "done" });
+					const partId = `${m.id}-t${textN++}`; // consumed even when hidden, so later ids stay stable
+					if (duplicates.has(deliveryKey(m.id, contentIndex))) continue;
+					rest.push({ type: "text", id: partId, text: block.text, state: "done" });
 				} else if (block.type === "thinking") {
 					reasoning.push({ type: "reasoning", id: `${m.id}-r${reasoningN++}`, text: block.thinking, state: "done" });
 				} else if (block.type === "toolCall") {

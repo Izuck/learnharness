@@ -22,6 +22,7 @@
 import { createHash } from "node:crypto";
 
 import type { CoverageEntry } from "./contracts/graph.ts";
+import { duplicateDeliveryKeys, hiddenIndexesOf } from "./delivered-duplicates.ts";
 import { failedOutputCallIds, userFacingTextOf, type LhMessage } from "./native-messages.ts";
 
 export type { CoverageEntry };
@@ -39,10 +40,14 @@ export function messageViewLines(
 	message: LhMessage,
 	mid: string,
 	failedOutputCalls: ReadonlySet<string> = failedOutputCallIds([message]),
+	duplicateKeys?: ReadonlySet<string>,
 ): string[] {
 	const lines: string[] = [];
 	if ((message as { role?: string }).role !== "assistant") return lines;
-	for (const text of userFacingTextOf((message as { content: unknown }).content, failedOutputCalls)) {
+	// A text block repeating a send_to_user message delivered earlier in the
+	// turn contributes no line (the call's copy is the one the learner reads).
+	const hidden = duplicateKeys ? hiddenIndexesOf(message, duplicateKeys) : undefined;
+	for (const text of userFacingTextOf((message as { content: unknown }).content, failedOutputCalls, hidden)) {
 		lines.push(`TEACHER [${mid}] ${text.trim()}`);
 	}
 	return lines;
@@ -57,9 +62,10 @@ export function messageViewLines(
 export function teacherProseBlocks(messages: ReadonlyArray<LhMessage>): string[] {
 	const out: string[] = [];
 	const failedOutputCalls = failedOutputCallIds(messages);
+	const duplicateKeys = duplicateDeliveryKeys(messages);
 	for (const message of messages) {
 		if ((message as { role?: string }).role !== "assistant") continue;
-		for (const text of userFacingTextOf((message as { content: unknown }).content, failedOutputCalls)) out.push(text.trim());
+		for (const text of userFacingTextOf((message as { content: unknown }).content, failedOutputCalls, hiddenIndexesOf(message, duplicateKeys))) out.push(text.trim());
 	}
 	return out;
 }
@@ -74,9 +80,13 @@ export function viewTokens(lines: string[]): number {
  * teacher prose, with the message id as the tag). Changes exactly when
  * the teacher prose of the message changes — nothing else can re-open it.
  */
-export function messageFingerprint(message: LhMessage, failedOutputCalls?: ReadonlySet<string>): string {
+export function messageFingerprint(
+	message: LhMessage,
+	failedOutputCalls?: ReadonlySet<string>,
+	duplicateKeys?: ReadonlySet<string>,
+): string {
 	const h = createHash("sha256");
-	h.update(JSON.stringify([(message as { role?: string }).role, messageViewLines(message, message.id, failedOutputCalls)]));
+	h.update(JSON.stringify([(message as { role?: string }).role, messageViewLines(message, message.id, failedOutputCalls, duplicateKeys)]));
 	return h.digest("hex");
 }
 
@@ -91,10 +101,11 @@ export interface CoverageSlot {
  *  and the coverage view — one derivation everywhere). */
 export function coverageSlots(messages: ReadonlyArray<LhMessage>): CoverageSlot[] {
 	const failedOutputCalls = failedOutputCallIds(messages);
+	const duplicateKeys = duplicateDeliveryKeys(messages);
 	return messages.map((message) => ({
 		message,
-		fp: messageFingerprint(message, failedOutputCalls),
-		tokens: viewTokens(messageViewLines(message, message.id, failedOutputCalls)),
+		fp: messageFingerprint(message, failedOutputCalls, duplicateKeys),
+		tokens: viewTokens(messageViewLines(message, message.id, failedOutputCalls, duplicateKeys)),
 	}));
 }
 

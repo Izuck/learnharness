@@ -136,12 +136,19 @@ export function sendToUserText(block: unknown): string | undefined {
 
 /** Learner-facing prose, in content order. Only the explicit output tool
  * joins ordinary text here — thinking and all other tool inputs stay out.
- * Shared by coverage/extraction and Markdown; native history stays intact. */
-export function userFacingTextOf(content: unknown, failedOutputCalls?: ReadonlySet<string>): string[] {
+ * Shared by coverage/extraction and Markdown; native history stays intact.
+ * `hiddenIndexes` — content indexes to skip: text blocks that repeat a
+ * delivered send_to_user message (core/delivered-duplicates.ts). */
+export function userFacingTextOf(
+	content: unknown,
+	failedOutputCalls?: ReadonlySet<string>,
+	hiddenIndexes?: ReadonlySet<number>,
+): string[] {
 	if (typeof content === "string") return content.trim() ? [content] : [];
 	if (!Array.isArray(content)) return [];
 	const out: string[] = [];
-	for (const block of content) {
+	for (const [index, block] of content.entries()) {
+		if (hiddenIndexes?.has(index)) continue; // a delivered duplicate (core/delivered-duplicates.ts)
 		if (!block || typeof block !== "object") continue;
 		if (block.type === "toolCall" && failedOutputCalls?.has(block.id)) continue;
 		const text = block.type === "text" ? block.text : sendToUserText(block);

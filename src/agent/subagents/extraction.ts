@@ -28,6 +28,7 @@ import type { GraphStore } from "../../core/ports.ts";
 import { emit } from "../../core/events.ts";
 import { settleGraphLayout } from "../../core/layout-settle.ts";
 import { batchRuns, coverageOf, messageViewLines } from "../../core/coverage.ts";
+import { duplicateDeliveryKeys } from "../../core/delivered-duplicates.ts";
 import { failedOutputCallIds, type LhMessage } from "../../core/native-messages.ts";
 import { auditorGraphTools } from "../tools/graph.ts";
 import { runSubmitAgent, healStringifiedArrays } from "./submit-agent.ts";
@@ -136,8 +137,9 @@ function proseView(
 	messages: ReadonlyArray<LhMessage>,
 	title?: string,
 	failedOutputCalls: ReadonlySet<string> = failedOutputCallIds(messages),
+	duplicateKeys: ReadonlySet<string> = duplicateDeliveryKeys(messages),
 ): string {
-	const lines = messages.flatMap((message) => messageViewLines(message, message.id, failedOutputCalls));
+	const lines = messages.flatMap((message) => messageViewLines(message, message.id, failedOutputCalls, duplicateKeys));
 	const head = title && title.length > 0 ? `# ${title}\n\n` : "";
 	return head + lines.join("\n\n");
 }
@@ -1118,6 +1120,9 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 			refuseIfStagesUnready();
 			const covered = coverageOf(record.messages, graphStore.readCoverage(), chatId);
 			const failedOutputCalls = failedOutputCallIds(record.messages);
+			// Whole-record context: a batch is a subset, but a duplicate's
+			// original may sit in an earlier batch.
+			const duplicateKeys = duplicateDeliveryKeys(record.messages);
 			if (covered.uncovered.length === 0) {
 				console.info(`[extraction ${chatId}] nothing uncovered — no-op`);
 				return { nodes: 0, chains: 0 };
@@ -1153,14 +1158,14 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 							// fingerprints' messageViewLines ("TEACHER [id] text"), one
 							// shared seam.
 							const messages = batch.map((slot) => slot.message);
-							const view = proseView(messages, record.title, failedOutputCalls);
+							const view = proseView(messages, record.title, failedOutputCalls, duplicateKeys);
 							// The batch's teacher-prose ids — the ONLY anchors this
 							// job's submit may name (validateSessionAnchors at the
 							// submit seam refuses anything else: ids from other
 							// batches — even real ones of this chat — other chats,
 							// and non-prose messages).
 							const batchIds = new Set(
-								messages.filter((m) => messageViewLines(m, m.id, failedOutputCalls).length > 0).map((m) => m.id),
+								messages.filter((m) => messageViewLines(m, m.id, failedOutputCalls, duplicateKeys).length > 0).map((m) => m.id),
 							);
 							setPhase(jobKey, "queued", "chat", undefined, part);
 							const findings = await withExtractSlot(jobKey, async () => {

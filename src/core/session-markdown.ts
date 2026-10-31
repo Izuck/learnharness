@@ -21,6 +21,7 @@
  */
 
 import type { LhMessage } from "./native-messages.ts";
+import { duplicateDeliveryKeys, hiddenIndexesOf } from "./delivered-duplicates.ts";
 import {
 	failedOutputCallIds,
 	PRACTICE_CONCLUDE_TOOL,
@@ -42,6 +43,8 @@ export interface MarkdownContext {
 	/** toolCallId → the call part's name + arguments. */
 	calls: Map<string, { name: string; args: Record<string, unknown> | undefined }>;
 	failedOutputCalls?: ReadonlySet<string>;
+	/** Text blocks that repeat a delivered send_to_user message (core/delivered-duplicates.ts). */
+	duplicateKeys?: ReadonlySet<string>;
 }
 
 function markdownContext(messages: ReadonlyArray<LhMessage>): MarkdownContext {
@@ -60,7 +63,7 @@ function markdownContext(messages: ReadonlyArray<LhMessage>): MarkdownContext {
 			}
 		}
 	}
-	return { messages, calls, failedOutputCalls: failedOutputCallIds(messages) };
+	return { messages, calls, failedOutputCalls: failedOutputCallIds(messages), duplicateKeys: duplicateDeliveryKeys(messages) };
 }
 
 /** solvedWithHints → "Solved with hints" — the outcome enum reads as prose. */
@@ -170,7 +173,8 @@ export function messageMarkdown(
 			parts.push(`### Learner${anchor}\n\n${text.trim()}`);
 		}
 	} else if (role === "assistant") {
-		for (const text of userFacingTextOf((message as { content: unknown }).content, ctx?.failedOutputCalls ?? failedOutputCallIds([message]))) {
+		const hidden = ctx?.duplicateKeys ? hiddenIndexesOf(message, ctx.duplicateKeys) : undefined;
+		for (const text of userFacingTextOf((message as { content: unknown }).content, ctx?.failedOutputCalls ?? failedOutputCallIds([message]), hidden)) {
 			parts.push(`### Teacher${anchor}\n\n${text.trim()}`);
 		}
 	} else if (role === "toolResult") {
