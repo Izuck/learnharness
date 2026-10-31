@@ -2,6 +2,8 @@ import type { Usage } from "@earendil-works/pi-ai";
 
 export type CliUsage = Partial<Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite">>;
 
+export type CliToolResult = { id: string; isError: boolean; text: string };
+
 export type CliBlock = { type: "text" } | { type: "thinking" } | { type: "toolUse"; id: string; name: string };
 
 export type CliEvent =
@@ -15,7 +17,7 @@ export type CliEvent =
 	| { type: "messageStop" }
 	| { type: "assistantError"; error: string; text: string }
 	| { type: "resultError"; text: string }
-	| { type: "toolResults"; ids: string[]; errorIds: string[] };
+	| { type: "toolResults"; ids: string[]; results: CliToolResult[] };
 
 type RawUsage = {
 	input_tokens?: number | null;
@@ -47,7 +49,7 @@ type RawCliLine = {
 	type?: string;
 	event?: RawStreamEvent;
 	error?: string | null;
-	message?: { content?: { type: string; text?: string; tool_use_id?: string; is_error?: boolean }[] };
+	message?: { content?: { type: string; text?: string; tool_use_id?: string; is_error?: boolean; content?: unknown }[] };
 	is_error?: boolean;
 	result?: string;
 	subtype?: string;
@@ -146,6 +148,12 @@ function getText(line: RawCliLine): string {
 	return texts.join("\n");
 }
 
+function getToolResultText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content.flatMap((part: unknown) => typeof part === "object" && part !== null && (part as { type?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string" ? [(part as { text: string }).text] : []).join("\n");
+}
+
 function getResultErrorText(line: RawCliLine): string {
 	if (line.result) return line.result;
 	if (line.errors?.length) return line.errors.join("\n");
@@ -174,8 +182,8 @@ export function parseCliLine(text: string): CliEvent | null {
 
 		case "user": {
 			const blocks = Array.isArray(line.message?.content) ? line.message.content : [];
-			const results = blocks.flatMap((block) => block.type === "tool_result" && typeof block.tool_use_id === "string" ? [{ id: block.tool_use_id, isError: block.is_error === true }] : []);
-			return results.length ? { type: "toolResults", ids: results.map((result) => result.id), errorIds: results.filter((result) => result.isError).map((result) => result.id) } : null;
+			const results = blocks.flatMap((block): CliToolResult[] => block.type === "tool_result" && typeof block.tool_use_id === "string" ? [{ id: block.tool_use_id, isError: block.is_error === true, text: getToolResultText(block.content) }] : []);
+			return results.length ? { type: "toolResults", ids: results.map((result) => result.id), results } : null;
 		}
 
 		case "result":

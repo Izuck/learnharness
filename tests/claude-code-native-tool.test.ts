@@ -57,6 +57,17 @@ function cliResult(id: string, isError: boolean): string {
 	] } });
 }
 
+/** A tool_result whose is_error flag and content are exactly as given (the flag may be absent). */
+function rawResult(id: string, content: unknown, isError?: boolean): string {
+	return JSON.stringify({ type: "user", message: { content: [
+		{ type: "tool_result", tool_use_id: id, content, ...(isError === undefined ? {} : { is_error: isError }) },
+	] } });
+}
+
+function nativeOnlyMessage(id: string): string[] {
+	return [...message(toolUseBlock(0, id, "Read", { file_path: "x" }), "tool_use"), cliResult(id, true)];
+}
+
 function run(t: TestContext, scenario: string[]): Promise<AssistantMessageEvent[]> {
 	const dir = mkdtempSync(join(tmpdir(), "claude-code-native-test-"));
 	t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -100,7 +111,10 @@ test("a native tool call the CLI rejects is ignored and the turn carries on", as
 	assert.equal(last.reason, "stop");
 	assert.deepEqual(last.message.content, [{ type: "text", text: "Carrying on." }]);
 	assert.equal(events.some((event) => event.type === "toolcall_start" || event.type === "toolcall_end"), false);
-	assert.deepEqual(warn.mock.calls.map((call) => call.arguments), [["claude CLI native tool call ignored:", "Read"]]);
+	assert.deepEqual(warn.mock.calls.map((call) => call.arguments), [
+		["claude CLI native tool call ignored:", "Read"],
+		["claude CLI declined native tool call:", "Read", "No such tool available: Read"],
+	]);
 });
 
 test("a native tool call beside a bridge call is ignored and only the bridge call is admitted", async (t) => {
@@ -132,4 +146,122 @@ test("a successful result for a native tool call fails the turn and names the to
 	const last = events.at(-1);
 	assert.ok(last?.type === "error", `turn ended with ${last?.type}`);
 	assert.match(last.error.errorMessage ?? "", /ran a native tool \(Read\) outside the app/);
+});
+
+test("two native-only messages in a row are tolerated and the turn still finishes", async (t) => {
+	t.mock.method(console, "warn", () => {});
+	const events = await run(t, [
+		...nativeOnlyMessage("toolu_n1"),
+		...nativeOnlyMessage("toolu_n2"),
+		...message(textBlock(0, "Carrying on."), "end_turn"),
+	]);
+
+	const last = events.at(-1);
+	assert.ok(last?.type === "done", `turn ended with ${last?.type}`);
+	assert.deepEqual(last.message.content, [{ type: "text", text: "Carrying on." }]);
+});
+
+test("a model that keeps calling tools the app does not offer fails the turn on the fourth native-only message", async (t) => {
+	t.mock.method(console, "warn", () => {});
+	const events = await run(t, [
+		...nativeOnlyMessage("toolu_n1"),
+		...nativeOnlyMessage("toolu_n2"),
+		...nativeOnlyMessage("toolu_n3"),
+		...nativeOnlyMessage("toolu_n4"),
+		...message(textBlock(0, "never reached"), "end_turn"),
+	]);
+
+	const last = events.at(-1);
+	assert.ok(last?.type === "error", `turn ended with ${last?.type}`);
+	assert.equal(last.error.errorMessage, "claude CLI kept calling tools the app does not offer (Read)");
+	assert.equal(events.some((event) => event.type === "toolcall_end"), false);
+});
+
+test("the failure for a native tool the CLI ran carries a truncated copy of its result", async (t) => {
+	t.mock.method(console, "warn", () => {});
+	const events = await run(t, [
+		...message(toolUseBlock(0, "toolu_native", "Read", { file_path: "x" }), "tool_use"),
+		rawResult("toolu_native", [{ type: "text", text: `${"a".repeat(200)}${"b".repeat(100)}` }], false),
+		HOLD,
+	]);
+
+	const last = events.at(-1);
+	assert.ok(last?.type === "error", `turn ended with ${last?.type}`);
+	assert.equal(last.error.errorMessage, `claude CLI ran a native tool (Read) outside the app: ${"a".repeat(200)}`);
+});
+
+test("a result wrapped in tool_use_error counts as declined even without is_error", async (t) => {
+	const warn = t.mock.method(console, "warn", () => {});
+	const events = await run(t, [
+		...message(toolUseBlock(0, "toolu_native", "Read", { file_path: "x" }), "tool_use"),
+		rawResult("toolu_native", "<tool_use_error>Error: No such tool available: Read</tool_use_error>"),
+		...message(textBlock(0, "Carrying on."), "end_turn"),
+	]);
+
+	const last = events.at(-1);
+	assert.ok(last?.type === "done", `turn ended with ${last?.type}`);
+	assert.deepEqual(warn.mock.calls.at(-1)?.arguments, ["claude CLI declined native tool call:", "Read", "<tool_use_error>Error: No such tool available: Read</tool_use_error>"]);
+});
+
+test("a result with no is_error and no tool_use_error wrapper still fails closed", async (t) => {
+	t.mock.method(console, "warn", () => {});
+	const events = await run(t, [
+		...message(toolUseBlock(0, "toolu_native", "Read", { file_path: "x" }), "tool_use"),
+		rawResult("toolu_native", "file contents"),
+		HOLD,
+	]);
+
+	const last = events.at(-1);
+	assert.ok(last?.type === "error", `turn ended with ${last?.type}`);
+	assert.match(last.error.errorMessage ?? "", /ran a native tool \(Read\) outside the app: file contents/);
+});
+
+test("an authenticated MCP call carrying an ignored native call's id is never admitted", async (t) => {
+	t.mock.method(console, "warn", () => {});
+	const events = await run(t, [
+		...message(toolUseBlock(0, "toolu_native", "Read", { file_path: "x" }), "tool_use"),
+		JSON.stringify({ fake: "start-call", id: "toolu_native", name: "read", arguments: { path: "x" } }),
+		cliResult("toolu_native", true),
+		...message(textBlock(0, "Carrying on."), "end_turn"),
+	]);
+
+	const last = events.at(-1);
+	assert.ok(last?.type === "done", `turn ended with ${last?.type}`);
+	assert.equal(last.reason, "stop");
+	assert.equal(last.message.content.some((block) => block.type === "toolCall"), false);
+	assert.equal(events.some((event) => event.type === "toolcall_start" || event.type === "toolcall_end"), false);
+});
+
+test("beside a real bridge call, an MCP call carrying the ignored native id fails closed instead of being admitted", async (t) => {
+	t.mock.method(console, "warn", () => {});
+	const events = await run(t, [
+		...message([
+			...toolUseBlock(0, "toolu_native", "Read", { file_path: "x" }),
+			...toolUseBlock(1, "toolu_bridge", "mcp__learnharness__read", { path: "a" }),
+		], "tool_use"),
+		JSON.stringify({ fake: "start-call", id: "toolu_native", name: "read", arguments: { path: "x" } }),
+		HOLD,
+	]);
+
+	const last = events.at(-1);
+	assert.ok(last?.type === "error", `turn ended with ${last?.type}`);
+	assert.match(last.error.errorMessage ?? "", /does not match its streamed tool intent/);
+	assert.equal(events.some((event) => event.type === "toolcall_end"), false);
+});
+
+test("text before and after an ignored native call is separated by a paragraph break", async (t) => {
+	t.mock.method(console, "warn", () => {});
+	const events = await run(t, [
+		...message([...textBlock(0, "Let me check."), ...toolUseBlock(1, "toolu_native", "Read", { file_path: "x" })], "tool_use"),
+		cliResult("toolu_native", true),
+		...message(textBlock(0, "Carrying on."), "end_turn"),
+	]);
+
+	const last = events.at(-1);
+	assert.ok(last?.type === "done", `turn ended with ${last?.type}`);
+	const texts = last.message.content.flatMap((block) => block.type === "text" ? [block.text] : []);
+	assert.deepEqual(texts, ["Let me check.", "\n\nCarrying on."]);
+	assert.equal(texts.join(""), "Let me check.\n\nCarrying on.");
+	const streamed = events.flatMap((event) => event.type === "text_delta" ? [event.delta] : []);
+	assert.equal(streamed.join(""), "Let me check.\n\nCarrying on.");
 });

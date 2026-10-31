@@ -64,6 +64,12 @@ const STOP_REASONS: Record<string, StopReason> = {
 	refusal: "error",
 };
 
+// A model that keeps calling tools the app does not offer would otherwise spin the turn, one real
+// CLI request per message. Three native-only messages in a row are tolerated; the fourth fails.
+const MAX_NATIVE_ONLY_MESSAGES = 3;
+const NATIVE_RESULT_PREVIEW_CHARS = 200;
+const TOOL_USE_ERROR_PREFIX = "<tool_use_error>";
+
 const REFUSAL_MESSAGE = "The model refused to complete the request";
 const ABORT_MESSAGE = "Request was aborted";
 const START_FAILED_MESSAGE = "claude CLI failed to start";
@@ -149,6 +155,9 @@ class ClaudeTurn {
 	private readonly toolBlocks = new Map<number, ToolCall>();
 	private readonly intents: ToolCall[] = [];
 	private ignoredNativeInMessage = 0;
+	private nativeOnlyMessages = 0;
+	private textBoundaryPending = false;
+	lastIgnoredNativeName = "";
 	started = false;
 	finished = false;
 
@@ -244,10 +253,12 @@ class ClaudeTurn {
 	 * model's step, not the turn: the CLI answers each with an error result and
 	 * the model continues in a new message that this turn keeps collecting.
 	 */
-	resumeAfterIgnoredNative(): boolean {
-		if (!this.waitingForAdmission || this.intents.length > 0 || this.ignoredNativeInMessage === 0) return false;
+	resumeAfterIgnoredNative(): "resumed" | "limit" | "none" {
+		if (!this.waitingForAdmission || this.intents.length > 0 || this.ignoredNativeInMessage === 0) return "none";
+		if (++this.nativeOnlyMessages > MAX_NATIVE_ONLY_MESSAGES) return "limit";
 		this.output.stopReason = "pending";
-		return true;
+		this.textBoundaryPending = true;
+		return "resumed";
 	}
 
 	getMessage(): AssistantMessage { return this.output; }
@@ -289,13 +300,22 @@ class ClaudeTurn {
 		const contentIndex = this.output.content.length;
 
 		switch (block.type) {
-			case "text":
+			case "text": {
+				// Text on both sides of an ignored native call lands as adjacent blocks of
+				// one message; open the later one with a paragraph break so a plain join
+				// of the message's text does not run the two together.
+				const previous = this.output.content.at(-1);
+				const boundary = this.textBoundaryPending && previous?.type === "text" && previous.text !== "";
+				this.textBoundaryPending = false;
 				this.contentIndexes.set(index, contentIndex);
-				this.output.content.push({ type: "text", text: "" });
+				this.output.content.push({ type: "text", text: boundary ? "\n\n" : "" });
 				this.stream.push({ type: "text_start", contentIndex, partial: this.output });
+				if (boundary) this.stream.push({ type: "text_delta", contentIndex, delta: "\n\n", partial: this.output });
 				return;
+			}
 
 			case "thinking":
+				this.textBoundaryPending = false;
 				this.contentIndexes.set(index, contentIndex);
 				this.output.content.push({ type: "thinking", thinking: "" });
 				this.stream.push({ type: "thinking_start", contentIndex, partial: this.output });
@@ -308,6 +328,7 @@ class ClaudeTurn {
 				if (!isBridgeToolName(block.name)) {
 					console.warn("claude CLI native tool call ignored:", block.name);
 					this.ignoredNativeInMessage++;
+					this.lastIgnoredNativeName = block.name;
 					return;
 				}
 				this.toolBlocks.set(index, { type: "toolCall", id: block.id, name: toolNameFromMcp(block.name), arguments: {} });
@@ -571,9 +592,17 @@ class ClaudeProcess implements LiveProcess {
 		if (event.type === "toolResults") {
 			// An error result is the CLI declining a tool the app never offered. A
 			// successful one means the CLI ran that native tool itself, outside the app.
-			const ran = event.ids.find((id) => this.ignoredNativeCalls.has(id) && !event.errorIds.includes(id));
-			if (ran) {
-				this.fail(`claude CLI ran a native tool (${this.ignoredNativeCalls.get(ran)}) outside the app`);
+			// Fail closed: only an explicit error, or the CLI's own unknown-tool wrapper,
+			// counts as declined. The result text is logged so a wrong guess is diagnosable.
+			for (const result of event.results) {
+				const name = this.ignoredNativeCalls.get(result.id);
+				if (name === undefined) continue;
+				const preview = result.text.slice(0, NATIVE_RESULT_PREVIEW_CHARS);
+				if (result.isError || result.text.startsWith(TOOL_USE_ERROR_PREFIX)) {
+					console.warn("claude CLI declined native tool call:", name, preview);
+					continue;
+				}
+				this.fail(`claude CLI ran a native tool (${name}) outside the app: ${preview}`);
 				return;
 			}
 			if (event.ids.some((id) => this.sourceCalls.some((call) => call.id === id))) {
@@ -595,7 +624,14 @@ class ClaudeProcess implements LiveProcess {
 		if (event.type === "blockStart" && event.block.type === "toolUse" && !isBridgeToolName(event.block.name)) this.ignoredNativeCalls.set(event.block.id, event.block.name);
 		this.turn.handle(event);
 		if (this.turn.finished) { this.kill(); return; }
-		if (event.type === "messageStop" && this.turn.resumeAfterIgnoredNative()) return;
+		if (event.type === "messageStop") {
+			const resumed = this.turn.resumeAfterIgnoredNative();
+			if (resumed === "limit") {
+				this.fail(`claude CLI kept calling tools the app does not offer (${this.turn.lastIgnoredNativeName})`);
+				return;
+			}
+			if (resumed === "resumed") return;
+		}
 		if (event.type === "messageStop" && this.turn.waitingForAdmission) {
 			const intents = this.turn.getIntents();
 			if (intents.length === 0 || new Set(intents.map((call) => call.id)).size !== intents.length) {
