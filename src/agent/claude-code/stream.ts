@@ -108,8 +108,9 @@ export function toClaudeArgs(input: ClaudeArgsInput): string[] {
 		"--strict-mcp-config",
 		"--mcp-config",
 		input.mcpConfigFile,
+		// "local" keeps the owner's user plugins, output style and CLAUDE.md out of the tutor's agents.
 		"--setting-sources",
-		"user",
+		"local",
 		"--settings",
 		JSON.stringify({ disableAllHooks: true }),
 		"--disable-slash-commands",

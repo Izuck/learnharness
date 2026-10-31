@@ -300,7 +300,7 @@ test("toClaudeArgs includes every isolation flag from Global Constraints", () =>
 		"--mcp-config",
 		"/private/mcp.json",
 		"--setting-sources",
-		"user",
+		"local",
 		"--settings",
 		'{"disableAllHooks":true}',
 		"--disable-slash-commands",
