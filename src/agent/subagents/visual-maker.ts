@@ -6,6 +6,7 @@ import { Type } from "typebox";
 import { piEngineFor, type PiEngine, type ThinkingLevel } from "../models.ts";
 import { providerEventObserver, type ProviderEventObserver } from "../provider-events.ts";
 import type { VisualResult } from "../../core/contracts.ts";
+import { joinTextBlocks } from "../../core/text-blocks.ts";
 import { getHeadless, type HeadlessApi } from "./headless.ts";
 
 /**
@@ -178,11 +179,7 @@ export async function runVisualMaker(input: VisualMakerInput, opts: VisualMakerO
 
 			const toolCalls = result.content.filter((c): c is Extract<typeof c, { type: "toolCall" }> => c.type === "toolCall");
 			if (toolCalls.length === 0) {
-				finalText = result.content
-					.filter((c): c is { type: "text"; text: string } => c.type === "text")
-					.map((c) => c.text)
-					.join("")
-					.trim();
+				finalText = joinTextBlocks(result.content).trim();
 				// Doctrine gate: never deliver an unlooked SVG. If the current SVG
 				// changed since its last render (or was never rendered), show it now
 				// and make the model look before accepting the finish.

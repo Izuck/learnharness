@@ -15,6 +15,7 @@ import test, { type TestContext } from "node:test";
 import type { AssistantMessageEvent, Tool } from "@earendil-works/pi-ai";
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 
+import { joinTextBlocks } from "../src/core/text-blocks.ts";
 import { CLAUDE_CODE_MODELS } from "../src/agent/claude-code/provider.ts";
 import { createClaudeCodeStreamFunction, type RunClaude } from "../src/agent/claude-code/stream.ts";
 
@@ -204,7 +205,7 @@ test("a result wrapped in tool_use_error counts as declined even without is_erro
 });
 
 test("a result with no is_error and no tool_use_error wrapper still fails closed", async (t) => {
-	t.mock.method(console, "warn", () => {});
+	const warn = t.mock.method(console, "warn", () => {});
 	const events = await run(t, [
 		...message(toolUseBlock(0, "toolu_native", "Read", { file_path: "x" }), "tool_use"),
 		rawResult("toolu_native", "file contents"),
@@ -214,6 +215,7 @@ test("a result with no is_error and no tool_use_error wrapper still fails closed
 	const last = events.at(-1);
 	assert.ok(last?.type === "error", `turn ended with ${last?.type}`);
 	assert.match(last.error.errorMessage ?? "", /ran a native tool \(Read\) outside the app: file contents/);
+	assert.deepEqual(warn.mock.calls.at(-1)?.arguments, ["claude CLI ran native tool call outside the app:", "Read", "file contents"]);
 });
 
 test("an authenticated MCP call carrying an ignored native call's id is never admitted", async (t) => {
@@ -249,7 +251,19 @@ test("beside a real bridge call, an MCP call carrying the ignored native id fail
 	assert.equal(events.some((event) => event.type === "toolcall_end"), false);
 });
 
-test("text before and after an ignored native call is separated by a paragraph break", async (t) => {
+function thinkingBlock(index: number, thinking: string): string[] {
+	return [
+		streamEvent({ type: "content_block_start", index, content_block: { type: "thinking", thinking: "" } }),
+		streamEvent({ type: "content_block_delta", index, delta: { type: "thinking_delta", thinking } }),
+		streamEvent({ type: "content_block_stop", index }),
+	];
+}
+
+function textsOf(content: readonly { type: string; text?: string }[]): string[] {
+	return content.flatMap((block) => block.type === "text" ? [block.text ?? ""] : []);
+}
+
+test("[text, native] then [text]: no synthetic text is persisted, and the consumer join separates the two", async (t) => {
 	t.mock.method(console, "warn", () => {});
 	const events = await run(t, [
 		...message([...textBlock(0, "Let me check."), ...toolUseBlock(1, "toolu_native", "Read", { file_path: "x" })], "tool_use"),
@@ -259,9 +273,41 @@ test("text before and after an ignored native call is separated by a paragraph b
 
 	const last = events.at(-1);
 	assert.ok(last?.type === "done", `turn ended with ${last?.type}`);
-	const texts = last.message.content.flatMap((block) => block.type === "text" ? [block.text] : []);
-	assert.deepEqual(texts, ["Let me check.", "\n\nCarrying on."]);
-	assert.equal(texts.join(""), "Let me check.\n\nCarrying on.");
-	const streamed = events.flatMap((event) => event.type === "text_delta" ? [event.delta] : []);
-	assert.equal(streamed.join(""), "Let me check.\n\nCarrying on.");
+	assert.deepEqual(textsOf(last.message.content), ["Let me check.", "Carrying on."]);
+	assert.equal(joinTextBlocks(last.message.content), "Let me check.\n\nCarrying on.");
+});
+
+test("[text, native] then [thinking, text]: the consumer join still separates the texts", async (t) => {
+	t.mock.method(console, "warn", () => {});
+	const events = await run(t, [
+		...message([...textBlock(0, "Let me check."), ...toolUseBlock(1, "toolu_native", "Read", { file_path: "x" })], "tool_use"),
+		cliResult("toolu_native", true),
+		...message([...thinkingBlock(0, "hm"), ...textBlock(1, "Carrying on.")], "end_turn"),
+	]);
+
+	const last = events.at(-1);
+	assert.ok(last?.type === "done", `turn ended with ${last?.type}`);
+	assert.deepEqual(textsOf(last.message.content), ["Let me check.", "Carrying on."]);
+	assert.equal(joinTextBlocks(last.message.content), "Let me check.\n\nCarrying on.");
+});
+
+test("[text, native, text, bridge call] in one message: the consumer join separates the texts", async (t) => {
+	t.mock.method(console, "warn", () => {});
+	const events = await run(t, [
+		...message([
+			...textBlock(0, "Let me check."),
+			...toolUseBlock(1, "toolu_native", "Read", { file_path: "x" }),
+			...textBlock(2, "Now the real one."),
+			...toolUseBlock(3, "toolu_bridge", "mcp__learnharness__read", { path: "a" }),
+		], "tool_use"),
+		cliResult("toolu_native", true),
+		JSON.stringify({ fake: "call", id: "toolu_bridge", name: "read", arguments: { path: "a" } }),
+		HOLD,
+	]);
+
+	const last = events.at(-1);
+	assert.ok(last?.type === "done", `turn ended with ${last?.type}`);
+	assert.equal(last.reason, "toolUse");
+	assert.deepEqual(textsOf(last.message.content), ["Let me check.", "Now the real one."]);
+	assert.equal(joinTextBlocks(last.message.content), "Let me check.\n\nNow the real one.");
 });

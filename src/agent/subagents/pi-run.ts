@@ -1,6 +1,7 @@
 import { Agent, type AgentEvent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage, Usage } from "@earendil-works/pi-ai";
 import { randomUUID } from "node:crypto";
+import { joinTextBlocks } from "../../core/text-blocks.ts";
 import { APP_IDENTITY, piEngineFor, type PiEngine } from "../models.ts";
 import { usageWasAdmitted } from "../subscription-request-cycle.ts";
 import { providerEventObserver } from "../provider-events.ts";
@@ -145,11 +146,6 @@ export async function runSubagent(tools: AgentTool<any, any>[], opts: SubagentRu
 		.slice(before);
 	const assistants = newMessages.filter((m) => (m as { role?: string }).role === "assistant") as AssistantMessage[];
 	const last = assistants[assistants.length - 1];
-	const text = last
-		? last.content
-				.filter((c): c is { type: "text"; text: string } => c.type === "text")
-				.map((c) => c.text)
-				.join("")
-		: "";
+	const text = last ? joinTextBlocks(last.content) : "";
 	return { newMessages, text };
 }

@@ -156,7 +156,6 @@ class ClaudeTurn {
 	private readonly intents: ToolCall[] = [];
 	private ignoredNativeInMessage = 0;
 	private nativeOnlyMessages = 0;
-	private textBoundaryPending = false;
 	lastIgnoredNativeName = "";
 	started = false;
 	finished = false;
@@ -257,7 +256,6 @@ class ClaudeTurn {
 		if (!this.waitingForAdmission || this.intents.length > 0 || this.ignoredNativeInMessage === 0) return "none";
 		if (++this.nativeOnlyMessages > MAX_NATIVE_ONLY_MESSAGES) return "limit";
 		this.output.stopReason = "pending";
-		this.textBoundaryPending = true;
 		return "resumed";
 	}
 
@@ -300,22 +298,13 @@ class ClaudeTurn {
 		const contentIndex = this.output.content.length;
 
 		switch (block.type) {
-			case "text": {
-				// Text on both sides of an ignored native call lands as adjacent blocks of
-				// one message; open the later one with a paragraph break so a plain join
-				// of the message's text does not run the two together.
-				const previous = this.output.content.at(-1);
-				const boundary = this.textBoundaryPending && previous?.type === "text" && previous.text !== "";
-				this.textBoundaryPending = false;
+			case "text":
 				this.contentIndexes.set(index, contentIndex);
-				this.output.content.push({ type: "text", text: boundary ? "\n\n" : "" });
+				this.output.content.push({ type: "text", text: "" });
 				this.stream.push({ type: "text_start", contentIndex, partial: this.output });
-				if (boundary) this.stream.push({ type: "text_delta", contentIndex, delta: "\n\n", partial: this.output });
 				return;
-			}
 
 			case "thinking":
-				this.textBoundaryPending = false;
 				this.contentIndexes.set(index, contentIndex);
 				this.output.content.push({ type: "thinking", thinking: "" });
 				this.stream.push({ type: "thinking_start", contentIndex, partial: this.output });
@@ -602,6 +591,7 @@ class ClaudeProcess implements LiveProcess {
 					console.warn("claude CLI declined native tool call:", name, preview);
 					continue;
 				}
+				console.warn("claude CLI ran native tool call outside the app:", name, preview);
 				this.fail(`claude CLI ran a native tool (${name}) outside the app: ${preview}`);
 				return;
 			}

@@ -7,6 +7,7 @@ import { resolveSourcePath } from "../tools/fs-shared.ts";
 import { piEngineFor, type PiEngine, type ThinkingLevel } from "../models.ts";
 import { providerEventObserver, type ProviderEventObserver } from "../provider-events.ts";
 import type { PdfResult, PdfToolInput } from "../../core/contracts.ts";
+import { joinTextBlocks } from "../../core/text-blocks.ts";
 import { getHeadless, type HeadlessApi } from "./headless.ts";
 import { pdfExtract, pdfInfo, pdfProbe, pdfSearch, type PdfSearchHit } from "./pdf-ops.ts";
 
@@ -224,11 +225,7 @@ export async function runPdfReaderAgent(
 				(c): c is Extract<typeof c, { type: "toolCall" }> => c.type === "toolCall",
 			);
 			if (toolCalls.length === 0) {
-				finalText = result.content
-					.filter((c): c is { type: "text"; text: string } => c.type === "text")
-					.map((c) => c.text)
-					.join("")
-					.trim();
+				finalText = joinTextBlocks(result.content).trim();
 				// The gate stays on CONSULTED, not read: search-hit context
 				// lines are genuine consultation (anti-fabrication duty) — a
 				// search-only brief is honest. pagesRead is the UI's honest
