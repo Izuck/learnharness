@@ -394,7 +394,7 @@ test("tool scenario ends with toolcall_end (Claude's tool_use id, unprefixed nam
 	assert.deepEqual(done.message.content, [toolCallEnd.toolCall]);
 });
 
-test("unsupported native tool intent fails without exposing executable calls", async (t) => {
+test("a native tool intent beside a refused bridge call exposes no executable calls", async (t) => {
 	const { events } = await runScenario(t, [
 		streamEvent({ type: "message_start", message: { usage: {} } }),
 		streamEvent({
@@ -409,11 +409,13 @@ test("unsupported native tool intent fails without exposing executable calls", a
 		streamEvent({ type: "content_block_stop", index: 1 }),
 		streamEvent({ type: "message_delta", delta: { stop_reason: "tool_use" }, usage: {} }),
 		streamEvent({ type: "message_stop" }),
+		JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "toolu_b", is_error: true, content: "No such tool available: Bash" }] } }),
+		JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "toolu_a", is_error: true, content: "invalid arguments" }] } }),
 		HOLD,
 	]);
 
 	assert.equal(events.some((event) => event.type === "toolcall_end"), false);
-	assert.match(getErrorMessage(events) ?? "", /unsupported native tool/);
+	assert.match(getErrorMessage(events) ?? "", /refused.*before MCP admission/);
 });
 
 test("usage maps input/output/cacheRead/cacheWrite with zero cost, message_delta overriding message_start", async (t) => {

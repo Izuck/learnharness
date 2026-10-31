@@ -134,6 +134,10 @@ function createOutput(model: Model<Api>): AssistantMessage {
 	};
 }
 
+function isBridgeToolName(name: string): boolean {
+	return name.startsWith(`mcp__${BRIDGE_SERVER_NAME}__`);
+}
+
 function getAssistantErrorMessage(error: string, text: string): string {
 	return error === NOT_SIGNED_IN_ERROR ? ClaudeCodeError.NotSignedIn : text || error;
 }
@@ -144,6 +148,7 @@ class ClaudeTurn {
 	private readonly partialJson = new Map<number, string>();
 	private readonly toolBlocks = new Map<number, ToolCall>();
 	private readonly intents: ToolCall[] = [];
+	private ignoredNativeInMessage = 0;
 	started = false;
 	finished = false;
 
@@ -159,6 +164,7 @@ class ClaudeTurn {
 
 		switch (event.type) {
 			case "messageStart":
+				this.ignoredNativeInMessage = 0;
 				this.updateUsage(event.usage);
 				this.start();
 				return;
@@ -233,6 +239,17 @@ class ClaudeTurn {
 
 	getIntents(): ToolCall[] { return this.intents; }
 
+	/**
+	 * A message whose only tool calls were native ones the app ignored ends the
+	 * model's step, not the turn: the CLI answers each with an error result and
+	 * the model continues in a new message that this turn keeps collecting.
+	 */
+	resumeAfterIgnoredNative(): boolean {
+		if (!this.waitingForAdmission || this.intents.length > 0 || this.ignoredNativeInMessage === 0) return false;
+		this.output.stopReason = "pending";
+		return true;
+	}
+
 	getMessage(): AssistantMessage { return this.output; }
 
 	setContextWindow(tokens: number | undefined): void {
@@ -270,22 +287,27 @@ class ClaudeTurn {
 
 	private startBlock(index: number, block: CliBlock): void {
 		const contentIndex = this.output.content.length;
-		this.contentIndexes.set(index, contentIndex);
 
 		switch (block.type) {
 			case "text":
+				this.contentIndexes.set(index, contentIndex);
 				this.output.content.push({ type: "text", text: "" });
 				this.stream.push({ type: "text_start", contentIndex, partial: this.output });
 				return;
 
 			case "thinking":
+				this.contentIndexes.set(index, contentIndex);
 				this.output.content.push({ type: "thinking", thinking: "" });
 				this.stream.push({ type: "thinking_start", contentIndex, partial: this.output });
 				return;
 
 			case "toolUse":
-				if (!block.name.startsWith(`mcp__${BRIDGE_SERVER_NAME}__`)) {
-					this.fail("claude CLI emitted an unsupported native tool call", "error");
+				// A tool the app never offered (a user plugin, a native CLI tool) is not
+				// admitted, executed or shown. The CLI answers it with an error result
+				// and the model carries on; its deltas find no block and fall away.
+				if (!isBridgeToolName(block.name)) {
+					console.warn("claude CLI native tool call ignored:", block.name);
+					this.ignoredNativeInMessage++;
 					return;
 				}
 				this.toolBlocks.set(index, { type: "toolCall", id: block.id, name: toolNameFromMcp(block.name), arguments: {} });
@@ -403,6 +425,7 @@ class ClaudeProcess implements LiveProcess {
 	private sourceComplete = false;
 	private admitted: PendingToolCall[] = [];
 	private readonly cancelledIds = new Set<string>();
+	private readonly ignoredNativeCalls = new Map<string, string>();
 	private pendingError: string | undefined;
 	private contextWindow: number | undefined;
 	private contextProbe: ContextWindowProbe | undefined;
@@ -546,6 +569,13 @@ class ClaudeProcess implements LiveProcess {
 		const event = parseCliLine(line);
 		if (!event) return;
 		if (event.type === "toolResults") {
+			// An error result is the CLI declining a tool the app never offered. A
+			// successful one means the CLI ran that native tool itself, outside the app.
+			const ran = event.ids.find((id) => this.ignoredNativeCalls.has(id) && !event.errorIds.includes(id));
+			if (ran) {
+				this.fail(`claude CLI ran a native tool (${this.ignoredNativeCalls.get(ran)}) outside the app`);
+				return;
+			}
 			if (event.ids.some((id) => this.sourceCalls.some((call) => call.id === id))) {
 				this.fail("claude CLI refused a harness tool call before MCP admission");
 			}
@@ -562,8 +592,10 @@ class ClaudeProcess implements LiveProcess {
 			return;
 		}
 		if (event.type === "messageStart") this.contextProbe?.refresh();
+		if (event.type === "blockStart" && event.block.type === "toolUse" && !isBridgeToolName(event.block.name)) this.ignoredNativeCalls.set(event.block.id, event.block.name);
 		this.turn.handle(event);
 		if (this.turn.finished) { this.kill(); return; }
+		if (event.type === "messageStop" && this.turn.resumeAfterIgnoredNative()) return;
 		if (event.type === "messageStop" && this.turn.waitingForAdmission) {
 			const intents = this.turn.getIntents();
 			if (intents.length === 0 || new Set(intents.map((call) => call.id)).size !== intents.length) {
