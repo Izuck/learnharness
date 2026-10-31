@@ -308,7 +308,7 @@ function validateSlotSpec(name: ModelSlotName, slot: { model?: { provider: strin
 
 /** Clamp one level against one model. Preserve the preference when metadata
  *  is unavailable for an unchanged saved pin; runtime clamps after reconnect. */
-function clampLevelFor(provider: string, id: string, level: ThinkingLevel): ThinkingLevel {
+export function clampLevelFor(provider: string, id: string, level: ThinkingLevel): ThinkingLevel {
 	const model = connectionModel(provider, id);
 	return model ? clampThinkingLevel(model, level) : level;
 }

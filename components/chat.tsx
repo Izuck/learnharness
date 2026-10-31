@@ -39,6 +39,7 @@ import {
 	isProviderKeyRefusal,
 	firstSourceTextParts,
 	cliContextWindowOf,
+	cliResolvedModelOf,
 	messageAnchorId,
 	textPartMessageId,
 	kbdEventForAction as kbdEventForChat,
@@ -1695,6 +1696,7 @@ export function Chat({
 					turns={turns}
 					contextTokens={contextTokens}
 					cliContextWindow={cliContextWindowOf(nativeMessages)}
+					cliResolvedModel={cliResolvedModelOf(nativeMessages)}
 					pricing={pricing}
 					onReserve={setDockReserve}
 					dictationSlot={<DictationBar dictation={dictation} />}
@@ -1922,6 +1924,7 @@ function DockOverlay({
 	turns,
 	contextTokens,
 	cliContextWindow,
+	cliResolvedModel,
 	pricing,
 	composer,
 	onSubmitAnswer,
@@ -1959,6 +1962,7 @@ function DockOverlay({
 	turns: TurnUsage[];
 	contextTokens: number | null;
 	cliContextWindow: ReturnType<typeof cliContextWindowOf>;
+	cliResolvedModel: ReturnType<typeof cliResolvedModelOf>;
 	pricing?: SessionPricing;
 	composer: React.ReactNode;
 	onSubmitAnswer: (output: QuestionAnswerData) => void;
@@ -2415,6 +2419,7 @@ function DockOverlay({
 						turns={turns}
 						contextTokens={contextTokens}
 						cliContextWindow={cliContextWindow}
+						cliResolvedModel={cliResolvedModel}
 						pricing={pricing}
 						dictationSlot={dictationSlot}
 						chatId={chatId}

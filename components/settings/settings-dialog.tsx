@@ -389,6 +389,9 @@ export function SettingsDialogBody({
 										onSectionChange={(next: AgentSettings) =>
 											void write("agent", next)
 										}
+										onBackendSwitched={(settings: UserSettings) =>
+											setRecord(settings)
+										}
 										onCompactionChange={(next: CompactionSettings) =>
 											void write("compaction", next)
 										}

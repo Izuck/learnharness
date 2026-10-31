@@ -636,6 +636,25 @@ test("writes one user prompt after local-only control initialization and summary
 	assert(lines.slice(3).every((line) => JSON.parse(line).request.detail === "summary"));
 });
 
+test("the CLI init event's resolved model rides the message as cliResolvedModel", async (t) => {
+	const { events, calls } = await runScenario(t, readFixtureLines("text.jsonl"));
+
+	const done = getLastEvent(events);
+	assert.ok(done.type === "done");
+	// The recorded fixture's init line names claude-haiku-5-5; the alias asked for was opus.
+	assert.equal((done.message as { cliResolvedModel?: string }).cliResolvedModel, "claude-haiku-5-5");
+	assert.equal(done.message.model, "opus");
+
+	await assertCleanedUp(getOnlyCall(calls));
+});
+
+test("parseCliLine reads the init model, and ignores an init without one", () => {
+	assert.deepEqual(parseCliLine('{"type":"system","subtype":"init","model":"claude-opus-5-5"}'), { type: "init", model: "claude-opus-5-5" });
+	assert.equal(parseCliLine('{"type":"system","subtype":"init","model":""}'), null);
+	assert.equal(parseCliLine('{"type":"system","subtype":"init","model":7}'), null);
+	assert.equal(parseCliLine('{"type":"system","subtype":"status","model":"claude-opus-5-5"}'), null);
+});
+
 test("parseCliLine ignores non-JSON, system, rate-limit and successful result lines", () => {
 	assert.equal(parseCliLine("not json"), null);
 	assert.equal(parseCliLine("null"), null);

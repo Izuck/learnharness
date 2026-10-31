@@ -7,6 +7,7 @@ export type CliToolResult = { id: string; isError: boolean; text: string };
 export type CliBlock = { type: "text" } | { type: "thinking" } | { type: "toolUse"; id: string; name: string };
 
 export type CliEvent =
+	| { type: "init"; model: string }
 	| { type: "messageStart"; usage: CliUsage }
 	| { type: "blockStart"; index: number; block: CliBlock }
 	| { type: "textDelta"; index: number; text: string }
@@ -53,6 +54,7 @@ type RawCliLine = {
 	is_error?: boolean;
 	result?: string;
 	subtype?: string;
+	model?: string;
 	errors?: string[];
 };
 
@@ -173,6 +175,11 @@ export function parseCliLine(text: string): CliEvent | null {
 	const line = parsed as RawCliLine;
 
 	switch (line.type) {
+		// The session-start line names the model the CLI actually resolved the
+		// requested alias to (opus -> claude-opus-5-5); only a non-empty string counts.
+		case "system":
+			return line.subtype === "init" && typeof line.model === "string" && line.model !== "" ? { type: "init", model: line.model } : null;
+
 		case "stream_event":
 			return line.event ? parseStreamEvent(line.event) : null;
 

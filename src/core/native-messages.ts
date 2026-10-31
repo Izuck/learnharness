@@ -96,6 +96,10 @@ export type LhMessage = (UserMessage | AssistantMessage | ToolResultMessage | Lh
 	/** CLI-reported effective context budget, not a catalog model maximum.
 	 * App-only metadata: never transmitted as provider/model message content. */
 	cliContextWindow?: number;
+	/** The model id the Claude Code CLI resolved the requested alias to
+	 * (opus -> claude-opus-5-5), from its session-start event. App-only
+	 * metadata beside cliContextWindow: never sent as message content. */
+	cliResolvedModel?: string;
 };
 
 /** Latest response only: never borrow an older process/model's window when
@@ -108,6 +112,21 @@ export function cliContextWindowOf(messages: readonly LhMessage[]): { model: str
 		const tokens = message.cliContextWindow;
 		return message.provider === CLAUDE_CODE_PROVIDER && typeof tokens === "number" && Number.isSafeInteger(tokens) && tokens > 0
 			? { model: `${message.provider}:${message.model}`, tokens } : null;
+	}
+	return null;
+}
+
+/** The model the CLI actually ran the latest CLI response on (its resolved
+ * id, e.g. claude-opus-5-5), for the stats bar; null when the latest response
+ * is not a Claude Code one or carries none. Same latest-only discipline as
+ * cliContextWindowOf. */
+export function cliResolvedModelOf(messages: readonly LhMessage[]): { model: string; resolved: string } | null {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i]!;
+		if (message.role !== "assistant") continue;
+		const resolved = message.cliResolvedModel;
+		return message.provider === CLAUDE_CODE_PROVIDER && typeof resolved === "string" && resolved !== ""
+			? { model: `${message.provider}:${message.model}`, resolved } : null;
 	}
 	return null;
 }
@@ -645,7 +664,7 @@ export function toLlmMessages(messages: readonly AgentMessage[]): Message[] {
 			continue;
 		}
 		// Strip app-only id/CLI context metadata: the wire carries the native shape only.
-		const { id: _id, cliContextWindow: _cliContextWindow, ...native } = m as LhMessage;
+		const { id: _id, cliContextWindow: _cliContextWindow, cliResolvedModel: _cliResolvedModel, ...native } = m as LhMessage;
 		out.push(native as Message);
 		// Repair unanswered calls from completed generations, not calls in
 		// failed generations. Pi filters error/aborted assistants itself;

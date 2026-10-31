@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ChatSettings, ModelCatalogEntry, ModelCatalogResponse, ModelsSettings, UserSettings } from "@/src/core";
+import { backendOf, remapSpec, type Backend, type ChatSettings, type ModelCatalogEntry, type ModelCatalogResponse, type ModelsSettings, type UserSettings } from "@/src/core";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { prettyModel } from "@/components/usage-format";
 import { ModelMenuList, ThinkingMenuList } from "@/components/settings/model-menu";
@@ -247,6 +247,25 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 		return () => window.removeEventListener("lh:kbd-cycle-thinking", onCycleThinking);
 	}, [levels, effectiveLevel, effectiveProvider, effectiveId, apply]);
 
+	// The open lesson's one-click backend switch (forest spec B): a session
+	// owns its model from birth, so the global "Run on" switch never reaches
+	// it. Offered only in chat mode, for a Claude pin whose id has a
+	// counterpart on the other backend (a Claude plan lesson offers the API
+	// key and the reverse); the thinking level rides and the write clamps it.
+	const fromBackend = chatId && effectiveProvider ? backendOf({ provider: effectiveProvider }) : null;
+	const otherBackend: Backend | null =
+		fromBackend === "claude-code" ? "anthropic" : fromBackend === "anthropic" ? "claude-code" : null;
+	const lessonSwitch =
+		otherBackend && effectiveProvider && effectiveId
+			? remapSpec({ provider: effectiveProvider, id: effectiveId }, otherBackend)
+			: null;
+	const switchLesson = () => {
+		if (!lessonSwitch?.changed) return;
+		const { provider, id } = lessonSwitch.spec;
+		const target = catalog?.models.find((m) => m.provider === provider && m.id === id);
+		apply(provider, id, storedLevel ?? (target ? defaultOrderLevel(target.supportedLevels) : undefined));
+	};
+
 	// Selecting a model (click and Enter share one path): keep the
 	// thinking level only when the new model supports it — otherwise
 	// drop it (a carry-over would 400 at the server's catalog gate).
@@ -351,6 +370,16 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 									: "Strong tier — the default for new sessions"
 						}
 					/>
+					{lessonSwitch?.changed && otherBackend && (
+						<button
+							type="button"
+							data-testid="switch-lesson-backend"
+							onClick={switchLesson}
+							className="mt-1 rounded-lg px-2 py-1.5 text-left text-muted-foreground transition-colors hover:bg-muted hover:text-card-foreground"
+						>
+							Switch this lesson to {otherBackend === "anthropic" ? "API key" : "Claude plan"}
+						</button>
+					)}
 				</MenuShell>
 			)}
 

@@ -150,7 +150,7 @@ function getAssistantErrorMessage(error: string, text: string): string {
 }
 
 class ClaudeTurn {
-	private readonly output: AssistantMessage & Pick<LhMessage, "cliContextWindow">;
+	private readonly output: AssistantMessage & Pick<LhMessage, "cliContextWindow" | "cliResolvedModel">;
 	private readonly contentIndexes = new Map<number, number>();
 	private readonly partialJson = new Map<number, string>();
 	private readonly toolBlocks = new Map<number, ToolCall>();
@@ -264,6 +264,10 @@ class ClaudeTurn {
 
 	setContextWindow(tokens: number | undefined): void {
 		if (!this.finished && tokens !== undefined) this.output.cliContextWindow = tokens;
+	}
+
+	setResolvedModel(model: string | undefined): void {
+		if (!this.finished && model !== undefined) this.output.cliResolvedModel = model;
 	}
 
 	admit(calls: ToolCall[]): void {
@@ -439,6 +443,7 @@ class ClaudeProcess implements LiveProcess {
 	private readonly ignoredNativeCalls = new Map<string, string>();
 	private pendingError: string | undefined;
 	private contextWindow: number | undefined;
+	private resolvedModel: string | undefined;
 	private contextProbe: ContextWindowProbe | undefined;
 
 	constructor(
@@ -493,6 +498,7 @@ class ClaudeProcess implements LiveProcess {
 		this.conversation = structuredClone(conversationForReuse(messages));
 		this.turn = turn;
 		this.turn.setContextWindow(this.contextWindow);
+		this.turn.setResolvedModel(this.resolvedModel);
 		this.sourceComplete = this.sourceCalls.length > 0;
 		this.setSignal(signal);
 		if (this.stopping) return;
@@ -579,6 +585,13 @@ class ClaudeProcess implements LiveProcess {
 		if (this.contextProbe?.handle(JSON.parse(line))) return;
 		const event = parseCliLine(line);
 		if (!event) return;
+		if (event.type === "init") {
+			// Once per process, before any response: remember it for this turn and
+			// for the continuation turns that reuse the process.
+			this.resolvedModel = event.model;
+			this.turn.setResolvedModel(event.model);
+			return;
+		}
 		if (event.type === "toolResults") {
 			// An error result is the CLI declining a tool the app never offered. A
 			// successful one means the CLI ran that native tool itself, outside the app.

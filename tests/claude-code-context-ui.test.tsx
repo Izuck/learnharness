@@ -44,3 +44,21 @@ test("compact CLI context is numeric only; effective-window explanation appears 
 	await act(async () => render({ model: "claude-code:sonnet", tokens: 1000000 }));
 	assert.equal(document.querySelector('[data-testid="stats-context"]')?.textContent, "42k", "another alias cannot supply this session's denominator");
 });
+
+test("a CLI session's stats bar names the Claude plan and the model the CLI resolved", async () => {
+	globalThis.fetch = (async (url) => {
+		if (url === "/api/models") return Response.json({ models: CLAUDE_CODE_MODELS.map(toModelDto), providers: [], slots: { strong: null, cheap: null, vision: null }, defaults: null,
+			rolePins: { researcher: null, demoBuilder: null, visualMaker: null, extractor: null, auditor: null, placer: null } });
+		if (url === "/api/settings") return Response.json({ settings: { models: {} } });
+		if (url === "/api/chats/cli-session") return Response.json({ settings: { model: { provider: "claude-code", id: "opus" } } });
+		throw new Error(`unexpected request ${url}`);
+	}) as typeof fetch;
+	host = document.createElement("div"); document.body.append(host); root = createRoot(host);
+	const render = (resolved: { model: string; resolved: string } | null) => root!.render(<StatsBar chatId="cli-session" turns={[]} cliResolvedModel={resolved} />);
+	await act(async () => render({ model: "claude-code:opus", resolved: "claude-opus-5-5" }));
+	assert.equal(document.querySelector('[data-testid="stats-backend"]')?.textContent, "Claude plan · claude-opus-5-5");
+	await act(async () => render(null));
+	assert.equal(document.querySelector('[data-testid="stats-backend"]')?.textContent, "Claude plan", "no resolved model yet: just the backend");
+	await act(async () => render({ model: "claude-code:sonnet", resolved: "claude-sonnet-5-5" }));
+	assert.equal(document.querySelector('[data-testid="stats-backend"]')?.textContent, "Claude plan", "another alias's report is not this session's");
+});

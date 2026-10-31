@@ -71,6 +71,8 @@ export * from "./dictation.ts";
 // shape its success line describes, hence this type-only re-export.
 export type { ChatDeleteMode, ChatDeletionStats } from "./graph-deletion.ts";
 export * from "./settings-resolution.ts";
+// backend-parity.ts (forest spec B): the Claude plan <-> API key model mapping.
+export * from "./backend-parity.ts";
 export * from "./search.ts"; // search port (search wave, 2026-09-20)
 export * from "./session-find.ts";
 export * from "./session-navigation.ts";

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ContextWindowProbe } from "../src/agent/claude-code/context-window.ts";
 import { CLAUDE_CODE_MODELS } from "../src/agent/claude-code/provider.ts";
-import { asAgentMessages, cliContextWindowOf, toLlmMessages, type LhMessage } from "../src/core/native-messages.ts";
+import { asAgentMessages, cliContextWindowOf, cliResolvedModelOf, toLlmMessages, type LhMessage } from "../src/core/native-messages.ts";
 import { catalogLimits } from "../components/model-picker.tsx";
 import { contextLimitForModel, formatContextMeasurement } from "../components/stats-bar.tsx";
 import { toModelDto } from "../src/server/model-catalog.ts";
@@ -95,4 +95,15 @@ test("CLI catalog limits remain unknown and cannot create a global denominator",
 	const models = CLAUDE_CODE_MODELS.map(toModelDto);
 	assert(models.every((model) => model.contextWindow === null && model.maxTokens === null));
 	assert.equal(catalogLimits({ models }).size, 0);
+});
+
+test("cliResolvedModelOf reports the latest CLI response's resolved model, persisted but never sent to the provider", () => {
+	const first = assistant(); first.cliResolvedModel = "claude-opus-5-5";
+	assert.deepEqual(cliResolvedModelOf(JSON.parse(JSON.stringify([first]))), { model: "claude-code:opus", resolved: "claude-opus-5-5" });
+	assert(!("cliResolvedModel" in toLlmMessages(asAgentMessages([first]))[0]!));
+	assert.equal(first.cliResolvedModel, "claude-opus-5-5", "projection never mutates the stored report");
+	const unreported = assistant(); assert.equal(cliResolvedModelOf([first, unreported]), null, "never borrows an older response's model");
+	const api = assistant("claude-opus-5-5"); api.provider = "anthropic"; api.cliResolvedModel = "x";
+	assert.equal(cliResolvedModelOf([first, api]), null);
+	assert.equal(cliResolvedModelOf([]), null);
 });

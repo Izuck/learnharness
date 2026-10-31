@@ -67,12 +67,14 @@ import {
 	type GraphSettings,
 	type ModelSlotName,
 	type ModelsSettings,
+	type UserSettings,
 } from "@/src/core";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { prettyModel } from "@/components/usage-format";
 import { cn } from "@/lib/utils";
 import { SettingsGroup, SettingsRow, SettingsMenuTrigger, Toggle, CommitInput } from "./controls.tsx";
 import { ModelMenuList, ThinkingMenuList } from "./model-menu";
+import { BackendSwitchRow } from "./backend-switch";
 import { ChatGPTBackgroundAccess } from "./chatgpt-connection";
 import { NativeSubscriptionBackgroundAccess } from "./subscription-connections";
 
@@ -274,6 +276,7 @@ export function AgentSection({
 	onSectionChange,
 	onModelsChange,
 	onCompactionChange,
+	onBackendSwitched,
 }: {
 	agent: AgentSettings | undefined;
 	/** The `models` section (slot pins — engine-level, PUT /api/settings/models). */
@@ -291,6 +294,8 @@ export function AgentSection({
 	onModelsChange: (next: ModelsSettings) => void;
 	/** Writes the whole compaction section (replace-PUT discipline). */
 	onCompactionChange: (next: CompactionSettings) => void;
+	/** The stored record the backend switch answered with (the dialog's mirror). */
+	onBackendSwitched?: (settings: UserSettings) => void;
 }) {
 	const { catalog: body, failed: catalogFailed, refresh: refreshCatalog } = useModelCatalog();
 	const catalog = body?.models;
@@ -582,6 +587,8 @@ export function AgentSection({
 		<>
 			<SettingsGroup label="Models" testid="group-models">
 				{catalogFailed && <p role="alert" className="text-xs text-red-400">Model catalog could not be loaded. Check the connection and retry. <button type="button" className="underline" onClick={refreshCatalog}>Retry</button></p>}
+				{/* The one backend switch (forest spec B): above the slots it rewrites. */}
+				<BackendSwitchRow record={{ models, agent }} onSwitched={onBackendSwitched} />
 				{MODEL_SLOTS.map((slot) => {
 					const override = models?.[slot];
 					const modelId = override?.model?.id ?? "";

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { CLAUDE_CODE_PROVIDER, subscriptionLabels, subscriptionLabel, type cliContextWindowOf, type SessionPricing, type TurnUsage } from "@/src/core";
+import { CLAUDE_CODE_PROVIDER, subscriptionLabels, subscriptionLabel, type cliContextWindowOf, type cliResolvedModelOf, type SessionPricing, type TurnUsage } from "@/src/core";
 import { formatTokens, formatUsd, planCostLabel, prettyModel } from "@/components/usage-format";
 import { ModelControl, catalogLimits, useModelCatalog } from "@/components/model-picker";
 
@@ -41,6 +41,7 @@ export function StatsBar({
 	turns,
 	contextTokens = null,
 	cliContextWindow = null,
+	cliResolvedModel = null,
 	pricing,
 	dictationSlot,
 	chatId,
@@ -50,6 +51,9 @@ export function StatsBar({
 	turns: TurnUsage[];
 	contextTokens?: number | null;
 	cliContextWindow?: ReturnType<typeof cliContextWindowOf>;
+	/** The model the CLI resolved this session's latest response to (its init
+	 *  event) - named beside the model control for Claude plan sessions. */
+	cliResolvedModel?: ReturnType<typeof cliResolvedModelOf>;
 	pricing?: SessionPricing;
 	/** The bound session (per-session models, owner 2026-09-28): present
 	 *  on the in-session bar — the model control binds THE SESSION'S own
@@ -215,7 +219,17 @@ export function StatsBar({
 			{/* The model + thinking control — one controller for the conversation
 			    agents (prober/teacher); the record's `turns` above still folds
 			    the ACTUAL models billed, regardless of what the picker says. */}
-			<ModelControl chatId={chatId} onModelChange={modelChanged} />
+			<div className="flex items-center gap-2">
+				{/* Claude plan sessions name what actually ran: the CLI resolves the
+				    alias (opus) to a real model, reported on its session-start line.
+				    Only this session's matching response counts. */}
+				{selectedModel?.startsWith(`${CLAUDE_CODE_PROVIDER}:`) && (
+					<span data-testid="stats-backend" className="tabular-nums">
+						{cliResolvedModel?.model === selectedModel ? `Claude plan · ${cliResolvedModel.resolved}` : "Claude plan"}
+					</span>
+				)}
+				<ModelControl chatId={chatId} onModelChange={modelChanged} />
+			</div>
 		</div>
 	);
 }
