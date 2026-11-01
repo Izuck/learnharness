@@ -30,7 +30,7 @@ import type { LhMessage } from "../../core/native-messages.ts";
 import { ClaudeLaunchError, createClaudeLauncher } from "./launch.ts";
 import { parseCliLine, type CliBlock, type CliEvent, type CliUsage } from "./cli-events.ts";
 import { ClaudeCodeError } from "./constants.ts";
-import { cliErrorMessage } from "../../core/cli-errors.ts";
+import { cliErrorMessage, type RateLimitInfo } from "../../core/cli-errors.ts";
 import { ContextWindowProbe } from "./context-window.ts";
 import { addLiveProcess, getLiveProcess, removeLiveProcess, type LiveProcess } from "./live-processes.ts";
 import { configurationForReuse, conversationForReuse } from "./reuse-context.ts";
@@ -71,6 +71,10 @@ const STOP_REASONS: Record<string, StopReason> = {
 // CLI request per message. Three native-only messages in a row are tolerated; the fourth fails.
 const MAX_NATIVE_ONLY_MESSAGES = 3;
 const NATIVE_RESULT_PREVIEW_CHARS = 200;
+// The CLI reports the plan-limit status (rate_limit_event) right AFTER a message's message_stop and
+// before its final result line. A finished response waits this long for that trailer so the
+// status can ride the message; the next line of any kind, or the process closing, ends the wait sooner.
+const TRAILER_GRACE_MS = 500;
 const TOOL_USE_ERROR_PREFIX = "<tool_use_error>";
 
 const REFUSAL_MESSAGE = "The model refused to complete the request";
@@ -149,11 +153,11 @@ function isBridgeToolName(name: string): boolean {
 
 // The CLI's own words for a failed response, in the app's shared error vocabulary.
 function getAssistantErrorMessage(error: string, text: string): string {
-	return cliErrorMessage(text || error);
+	return cliErrorMessage(text || error, "claude-code", { code: error });
 }
 
 class ClaudeTurn {
-	private readonly output: AssistantMessage & Pick<LhMessage, "cliContextWindow" | "cliResolvedModel" | "cliNotice">;
+	private readonly output: AssistantMessage & Pick<LhMessage, "cliContextWindow" | "cliResolvedModel" | "cliRateLimit">;
 	private readonly contentIndexes = new Map<number, number>();
 	private readonly partialJson = new Map<number, string>();
 	private readonly toolBlocks = new Map<number, ToolCall>();
@@ -161,6 +165,7 @@ class ClaudeTurn {
 	private ignoredNativeInMessage = 0;
 	private nativeOnlyMessages = 0;
 	lastIgnoredNativeName = "";
+	trailerPending = false;
 	started = false;
 	finished = false;
 
@@ -234,7 +239,8 @@ class ClaudeTurn {
 			case "messageStop":
 				// Tool intent is not execution admission. The process publishes only
 				// calls that actually reach the authenticated MCP bridge.
-				if (this.output.stopReason !== "toolUse") this.finish();
+				// A finished response is held for its trailer (see TRAILER_GRACE_MS): finishPending() ends it.
+				if (this.output.stopReason !== "toolUse") this.trailerPending = true;
 				return;
 
 			case "assistantError":
@@ -242,7 +248,7 @@ class ClaudeTurn {
 				return;
 
 			case "resultError":
-				this.fail(cliErrorMessage(event.text), "error");
+				this.fail(cliErrorMessage(event.text, "claude-code"), "error");
 				return;
 		}
 	}
@@ -269,8 +275,15 @@ class ClaudeTurn {
 		if (!this.finished && tokens !== undefined) this.output.cliContextWindow = tokens;
 	}
 
-	setNotice(notice: string): void {
-		if (!this.finished) this.output.cliNotice = notice;
+	/** Ends the wait for the trailer: the held response completes (or fails) as message_stop would have. */
+	finishPending(): void {
+		if (!this.trailerPending) return;
+		this.trailerPending = false;
+		if (!this.finished) this.finish();
+	}
+
+	setRateLimit(info: RateLimitInfo): void {
+		if (!this.finished) this.output.cliRateLimit = info;
 	}
 
 	setResolvedModel(model: string | undefined): void {
@@ -442,6 +455,7 @@ class ClaudeProcess implements LiveProcess {
 	private closed = false;
 	private stopping = false;
 	private killTimer: NodeJS.Timeout | undefined;
+	private trailerTimer: NodeJS.Timeout | undefined;
 	private signal: AbortSignal | undefined;
 	private sourceCalls: ToolCall[] = [];
 	private sourceComplete = false;
@@ -591,6 +605,12 @@ class ClaudeProcess implements LiveProcess {
 		if (this.stopping || !line.trim()) return;
 		if (this.contextProbe?.handle(JSON.parse(line))) return;
 		const event = parseCliLine(line);
+		if (this.turn.trailerPending) {
+			// Whatever follows a finished response's message_stop closes it; a rate-limit report rides it.
+			if (event?.type === "rateLimit") this.turn.setRateLimit(event.info);
+			this.releaseTrailer();
+			return;
+		}
 		if (!event) return;
 		if (event.type === "init") {
 			// Once per process, before any response: remember it for this turn and
@@ -600,8 +620,8 @@ class ClaudeProcess implements LiveProcess {
 			return;
 		}
 		if (event.type === "rateLimit") {
-			// A plan-limit warning rides the response as a note; it never ends or alters the turn.
-			this.turn.setNotice(event.notice);
+			// The plan-limit report rides the response; it never ends or alters the turn.
+			this.turn.setRateLimit(event.info);
 			return;
 		}
 		if (event.type === "toolResults") {
@@ -640,6 +660,11 @@ class ClaudeProcess implements LiveProcess {
 		if (event.type === "blockStart" && event.block.type === "toolUse" && !isBridgeToolName(event.block.name)) this.ignoredNativeCalls.set(event.block.id, event.block.name);
 		this.turn.handle(event);
 		if (this.turn.finished) { this.kill(); return; }
+		if (this.turn.trailerPending) {
+			this.trailerTimer ??= setTimeout(() => this.releaseTrailer(), TRAILER_GRACE_MS);
+			this.trailerTimer.unref();
+			return;
+		}
 		if (event.type === "messageStop") {
 			const resumed = this.turn.resumeAfterIgnoredNative();
 			if (resumed === "limit") {
@@ -660,9 +685,18 @@ class ClaudeProcess implements LiveProcess {
 		}
 	}
 
+	private releaseTrailer(): void {
+		clearTimeout(this.trailerTimer);
+		this.trailerTimer = undefined;
+		this.turn.finishPending();
+		if (this.turn.finished) this.kill();
+	}
+
 	private handleClose(message: string): void {
 		if (this.closed) return;
 		this.closed = true;
+		clearTimeout(this.trailerTimer);
+		this.turn.finishPending();
 		this.contextProbe?.close();
 		clearTimeout(this.killTimer);
 		removeLiveProcess(this);

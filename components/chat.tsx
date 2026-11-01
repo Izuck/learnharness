@@ -34,13 +34,13 @@ import { DictationBar, finishDictation, joinDictation, useDictation } from "@/co
 import { useFieldCycle } from "@/components/field-cycle";
 import { JobsContext } from "@/components/jobs-context";
 import { StatsBar } from "@/components/stats-bar";
+import { PlanLimitNote } from "@/components/plan-limit-note";
 import { useServerEvent, useServerResync } from "@/components/server-events";
 import {
 	isProviderKeyRefusal,
 	firstSourceTextParts,
 	cliContextWindowOf,
 	cliResolvedModelOf,
-	cliNoticeOf,
 	messageAnchorId,
 	textPartMessageId,
 	kbdEventForAction as kbdEventForChat,
@@ -1655,11 +1655,7 @@ export function Chat({
 							)}
 							{openingError && <p role="alert" className="text-sm text-destructive">{OPENING_PROMPT_FAILURE}</p>}
 							{/* A warning, not a failure: the same banner shape as the error below, in the muted register, and never in its place. */}
-							{!error && cliNoticeOf(nativeMessages) && (
-								<div role="status" data-testid="cli-notice" className="rounded-lg border border-border bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
-									{cliNoticeOf(nativeMessages)}
-								</div>
-							)}
+							{!error && <PlanLimitNote messages={nativeMessages} selectedModel={selectedModel} />}
 							{error && (
 								<div className="flex items-center justify-between gap-3 rounded-lg border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm">
 									<span>Something went wrong: {error.message}</span>

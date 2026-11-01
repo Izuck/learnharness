@@ -25,10 +25,53 @@ test("API stream errors are rewritten through the shared vocabulary, in events a
 	assert.equal((await mapped.result()).errorMessage, "Claude is busy right now. Try again in a moment.");
 });
 
+test("an API 401 says the key was rejected, not that Claude Code is signed out", async () => {
+	const source = createAssistantMessageEventStream();
+	const mapped = mapStreamErrors(source);
+	source.push({ type: "error", reason: "error", error: failed('401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}') });
+	source.end();
+	assert.equal((await mapped.result()).errorMessage, "Your Anthropic API key was rejected. Check it in Settings → Keys.");
+});
+
 test("API stream errors that are not recognised pass through unchanged", async () => {
 	const source = createAssistantMessageEventStream();
 	const mapped = mapStreamErrors(source);
 	source.push({ type: "error", reason: "error", error: failed("socket hang up") });
 	source.end();
 	assert.equal((await mapped.result()).errorMessage, "socket hang up");
+});
+
+test("a source that throws mid-stream ends the mapped stream with an error event, never hanging", async () => {
+	const unhandled: unknown[] = [];
+	const onUnhandled = (reason: unknown) => unhandled.push(reason);
+	process.on("unhandledRejection", onUnhandled);
+	try {
+		const partial = failed("");
+		const source = {
+			async *[Symbol.asyncIterator]() {
+				yield { type: "start" as const, partial };
+				throw new Error('529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}');
+			},
+		};
+		const mapped = mapStreamErrors(source as never);
+		const events = [];
+		for await (const event of mapped) events.push(event);
+		assert.deepEqual(events.map((event) => event.type), ["start", "error"]);
+		const last = events.at(-1)!;
+		assert.equal(last.type === "error" && last.error.errorMessage, "Claude is busy right now. Try again in a moment.");
+		assert.equal(last.type === "error" && last.error.stopReason, "error");
+		assert.equal((await mapped.result()).errorMessage, "Claude is busy right now. Try again in a moment.");
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.deepEqual(unhandled, []);
+	} finally {
+		process.off("unhandledRejection", onUnhandled);
+	}
+});
+
+test("a source that throws before any event still yields a usable error result", async () => {
+	const source = { async *[Symbol.asyncIterator]() { throw new Error("socket hang up"); } };
+	const mapped = mapStreamErrors(source as never);
+	const result = await mapped.result();
+	assert.equal(result.stopReason, "error");
+	assert.equal(result.errorMessage, "socket hang up");
 });

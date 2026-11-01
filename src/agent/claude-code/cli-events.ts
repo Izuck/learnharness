@@ -1,6 +1,6 @@
 import type { Usage } from "@earendil-works/pi-ai";
 
-import { rateLimitNotice } from "../../core/cli-errors.ts";
+import { parseRateLimitInfo, type RateLimitInfo } from "../../core/cli-errors.ts";
 
 export type CliUsage = Partial<Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite">>;
 
@@ -10,7 +10,7 @@ export type CliBlock = { type: "text" } | { type: "thinking" } | { type: "toolUs
 
 export type CliEvent =
 	| { type: "init"; model: string }
-	| { type: "rateLimit"; notice: string }
+	| { type: "rateLimit"; info: RateLimitInfo }
 	| { type: "messageStart"; usage: CliUsage }
 	| { type: "blockStart"; index: number; block: CliBlock }
 	| { type: "textDelta"; index: number; text: string }
@@ -183,10 +183,10 @@ export function parseCliLine(text: string): CliEvent | null {
 		case "system":
 			return line.subtype === "init" && typeof line.model === "string" && line.model !== "" ? { type: "init", model: line.model } : null;
 
-		// Only a warning or rejected status says anything; allowed or malformed gives null.
+		// Every recognised status is kept, "allowed" included: it supersedes an earlier warning.
 		case "rate_limit_event": {
-			const notice = rateLimitNotice(parsed);
-			return notice === null ? null : { type: "rateLimit", notice };
+			const info = parseRateLimitInfo(parsed);
+			return info === null ? null : { type: "rateLimit", info };
 		}
 
 		case "stream_event":

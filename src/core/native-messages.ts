@@ -37,6 +37,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Message, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
 import { QUESTION_TOOLS, type PendingQuestion } from "./pending.ts";
 import { CLAUDE_CODE_PROVIDER } from "./contracts/claude-code.ts";
+import { planLimitNotice, rateLimitActive, type RateLimitInfo } from "./cli-errors.ts";
 import {
 	CONCLUDE_ACK_TEXT,
 	HANDOFF_TEXT,
@@ -100,10 +101,10 @@ export type LhMessage = (UserMessage | AssistantMessage | ToolResultMessage | Lh
 	 * (opus -> claude-opus-5-5), from its session-start event. App-only
 	 * metadata beside cliContextWindow: never sent as message content. */
 	cliResolvedModel?: string;
-	/** A non-blocking note from the CLI about the response, e.g. the plan limit
-	 * is nearly used up (from its rate_limit_event). App-only metadata: never
-	 * sent as message content. */
-	cliNotice?: string;
+	/** The plan-limit status the CLI reported for this response (its rate_limit_event):
+	 * status plus reset time, so the warning is worded at display time and can expire.
+	 * App-only metadata beside cliContextWindow: never sent as message content. */
+	cliRateLimit?: RateLimitInfo;
 };
 
 /** Latest response only: never borrow an older process/model's window when
@@ -135,16 +136,25 @@ export function cliResolvedModelOf(messages: readonly LhMessage[]): { model: str
 	return null;
 }
 
-/** The note the latest assistant response carries, for the transcript's
- * non-blocking banner; null when that response has none. Latest-only, like
- * the other cli* readers: a later clean response clears it. */
-export function cliNoticeOf(messages: readonly LhMessage[]): string | null {
+/** The plan-limit report still in force for a lesson running on the Claude Code CLI, or null.
+ * The most recent report wins until superseded (an "allowed" report clears an earlier
+ * warning) and a response that carried none does not drop it; it ends when its reset time
+ * passes, when the lesson's current model (`provider:id`) is not a CLI one, or at a
+ * compaction marker (the same boundary as cliContextWindowOf). */
+export function cliRateLimitOf(messages: readonly LhMessage[], selectedModel: string | undefined, now = Date.now()): RateLimitInfo | null {
+	if (!selectedModel?.startsWith(`${CLAUDE_CODE_PROVIDER}:`)) return null;
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i]!;
-		if (message.role !== "assistant") continue;
-		return typeof message.cliNotice === "string" && message.cliNotice !== "" ? message.cliNotice : null;
+		if (message.role === "custom" && message.customType === "compaction") return null;
+		if (message.role !== "assistant" || message.provider !== CLAUDE_CODE_PROVIDER || !message.cliRateLimit) continue;
+		return rateLimitActive(message.cliRateLimit, now) ? message.cliRateLimit : null;
 	}
 	return null;
+}
+
+/** The learner-facing sentence for cliRateLimitOf, its reset time relative to `now`. */
+export function cliNoticeOf(messages: readonly LhMessage[], selectedModel: string | undefined, now = Date.now()): string | null {
+	return planLimitNotice(cliRateLimitOf(messages, selectedModel, now), now);
 }
 
 /** A record message list is assignable to the agent's context — that IS
@@ -680,7 +690,7 @@ export function toLlmMessages(messages: readonly AgentMessage[]): Message[] {
 			continue;
 		}
 		// Strip app-only id/CLI context metadata: the wire carries the native shape only.
-		const { id: _id, cliContextWindow: _cliContextWindow, cliResolvedModel: _cliResolvedModel, cliNotice: _cliNotice, ...native } = m as LhMessage;
+		const { id: _id, cliContextWindow: _cliContextWindow, cliResolvedModel: _cliResolvedModel, cliRateLimit: _cliRateLimit, ...native } = m as LhMessage;
 		out.push(native as Message);
 		// Repair unanswered calls from completed generations, not calls in
 		// failed generations. Pi filters error/aborted assistants itself;

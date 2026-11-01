@@ -636,25 +636,46 @@ test("writes one user prompt after local-only control initialization and summary
 	assert(lines.slice(3).every((line) => JSON.parse(line).request.detail === "summary"));
 });
 
-test("a plan-limit warning rides the message as cliNotice without failing the turn", async (t) => {
-	const lines = readFixtureLines("text.jsonl");
-	const warning = JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "allowed_warning", resetsAt: Math.floor(Date.now() / 1000) + 3 * 3600, rateLimitType: "five_hour" }, uuid: "u", session_id: "s" });
-	const { events, calls } = await runScenario(t, [lines[0]!, warning, ...lines.slice(1)]);
-
+test("the recorded allowed rate_limit_event rides the message, so it can supersede an earlier warning", async (t) => {
+	const { events } = await runScenario(t, readFixtureLines("text.jsonl"));
 	const done = getLastEvent(events);
 	assert.ok(done.type === "done");
-	assert.match((done.message as { cliNotice?: string }).cliNotice ?? "", /^Claude plan limit almost reached. It resets in 3 hours. Switch this lesson to your API key/);
+	assert.deepEqual((done.message as { cliRateLimit?: unknown }).cliRateLimit, { status: "allowed" });
+});
 
+test("a rate_limit_event ahead of the first stream event is captured and does not fail the turn", async (t) => {
+	const lines = readFixtureLines("text.jsonl").filter((line) => JSON.parse(line).type !== "rate_limit_event");
+	const early = JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "rejected", resetsAt: 4_000_000_000 } });
+	const { events } = await runScenario(t, [lines[0]!, early, ...lines.slice(1)]);
+	const done = getLastEvent(events);
+	assert.ok(done.type === "done");
+	assert.deepEqual((done.message as { cliRateLimit?: unknown }).cliRateLimit, { status: "rejected", resetsAt: 4_000_000_000 });
+});
+
+test("the CLI's real ordering (rate_limit_event AFTER message_stop, before result) still lands on the finished message", async (t) => {
+	// tests/fixtures/claude-code/text.jsonl is a recorded run: message_stop, then an allowed rate_limit_event, then the result.
+	const lines = readFixtureLines("text.jsonl");
+	const at = lines.findIndex((line) => JSON.parse(line).type === "rate_limit_event");
+	assert.ok(at > lines.findIndex((line) => JSON.parse(line).event?.type === "message_stop"), "fixture orders the event after message_stop");
+	const warning = JSON.stringify({ ...JSON.parse(lines[at]!), rate_limit_info: { status: "allowed_warning", resetsAt: 4_000_000_000 } });
+	const { events, calls } = await runScenario(t, lines.map((line, index) => (index === at ? warning : line)));
+	const done = getLastEvent(events);
+	assert.ok(done.type === "done");
+	assert.deepEqual((done.message as { cliRateLimit?: unknown }).cliRateLimit, { status: "allowed_warning", resetsAt: 4_000_000_000 });
 	await assertCleanedUp(getOnlyCall(calls));
 });
 
-test("an allowed rate_limit_event leaves no cliNotice", async (t) => {
+test("a finished response with no trailer still completes (the process just goes quiet)", async (t) => {
 	const lines = readFixtureLines("text.jsonl");
-	const allowed = JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "allowed", resetsAt: 1 }, uuid: "u", session_id: "s" });
-	const { events } = await runScenario(t, [lines[0]!, allowed, ...lines.slice(1)]);
-	const done = getLastEvent(events);
-	assert.ok(done.type === "done");
-	assert.equal("cliNotice" in done.message, false);
+	const stop = lines.findIndex((line) => JSON.parse(line).event?.type === "message_stop");
+	const { events } = await runScenario(t, [...lines.slice(0, stop + 1), HOLD]);
+	assert.ok(getLastEvent(events).type === "done");
+});
+
+test("an error carrying the sign-in code gets the sign-in sentence whatever its text says", async (t) => {
+	const odd = JSON.stringify({ type: "assistant", error: "authentication_failed", message: { content: [{ type: "text", text: "Something unexpected happened" }] } });
+	const { events } = await runScenario(t, [odd, exitWith(1, "")]);
+	assert.equal(getErrorMessage(events), `Claude Code isn't signed in. Open a terminal and run "claude" once to sign in.`);
 });
 
 test("the CLI init event's resolved model rides the message as cliResolvedModel", async (t) => {
