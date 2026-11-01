@@ -30,6 +30,7 @@ import type { LhMessage } from "../../core/native-messages.ts";
 import { ClaudeLaunchError, createClaudeLauncher } from "./launch.ts";
 import { parseCliLine, type CliBlock, type CliEvent, type CliUsage } from "./cli-events.ts";
 import { ClaudeCodeError } from "./constants.ts";
+import { cliErrorMessage } from "../../core/cli-errors.ts";
 import { ContextWindowProbe } from "./context-window.ts";
 import { addLiveProcess, getLiveProcess, removeLiveProcess, type LiveProcess } from "./live-processes.ts";
 import { configurationForReuse, conversationForReuse } from "./reuse-context.ts";
@@ -76,7 +77,6 @@ const REFUSAL_MESSAGE = "The model refused to complete the request";
 const ABORT_MESSAGE = "Request was aborted";
 const START_FAILED_MESSAGE = "claude CLI failed to start";
 const NO_STOP_REASON_MESSAGE = "claude CLI ended the message without a stop reason";
-const NOT_SIGNED_IN_ERROR = "authentication_failed";
 
 export function toEffort(level: ThinkingLevel | undefined): AnthropicEffort {
 	return level ? EFFORTS[level] : "medium";
@@ -147,12 +147,13 @@ function isBridgeToolName(name: string): boolean {
 	return name.startsWith(`mcp__${BRIDGE_SERVER_NAME}__`);
 }
 
+// The CLI's own words for a failed response, in the app's shared error vocabulary.
 function getAssistantErrorMessage(error: string, text: string): string {
-	return error === NOT_SIGNED_IN_ERROR ? ClaudeCodeError.NotSignedIn : text || error;
+	return cliErrorMessage(text || error);
 }
 
 class ClaudeTurn {
-	private readonly output: AssistantMessage & Pick<LhMessage, "cliContextWindow" | "cliResolvedModel">;
+	private readonly output: AssistantMessage & Pick<LhMessage, "cliContextWindow" | "cliResolvedModel" | "cliNotice">;
 	private readonly contentIndexes = new Map<number, number>();
 	private readonly partialJson = new Map<number, string>();
 	private readonly toolBlocks = new Map<number, ToolCall>();
@@ -241,7 +242,7 @@ class ClaudeTurn {
 				return;
 
 			case "resultError":
-				this.fail(event.text, "error");
+				this.fail(cliErrorMessage(event.text), "error");
 				return;
 		}
 	}
@@ -266,6 +267,10 @@ class ClaudeTurn {
 
 	setContextWindow(tokens: number | undefined): void {
 		if (!this.finished && tokens !== undefined) this.output.cliContextWindow = tokens;
+	}
+
+	setNotice(notice: string): void {
+		if (!this.finished) this.output.cliNotice = notice;
 	}
 
 	setResolvedModel(model: string | undefined): void {
@@ -592,6 +597,11 @@ class ClaudeProcess implements LiveProcess {
 			// for the continuation turns that reuse the process.
 			this.resolvedModel = event.model;
 			this.turn.setResolvedModel(event.model);
+			return;
+		}
+		if (event.type === "rateLimit") {
+			// A plan-limit warning rides the response as a note; it never ends or alters the turn.
+			this.turn.setNotice(event.notice);
 			return;
 		}
 		if (event.type === "toolResults") {

@@ -454,23 +454,23 @@ test('missing binary → error "claude CLI not found"', async () => {
 	await waitForRemoval(cwd);
 });
 
-test('signed-out fixture → error "not signed in"', async (t) => {
+test("signed-out fixture → the shared not-signed-in sentence", async (t) => {
 	const { events, calls } = await runScenario(t, [...readFixtureLines("signed-out.jsonl"), exitWith(1, "")]);
-	assert.equal(getErrorMessage(events), ClaudeCodeError.NotSignedIn);
+	assert.equal(getErrorMessage(events), `Claude Code isn't signed in. Open a terminal and run "claude" once to sign in.`);
 	await assertCleanedUp(getOnlyCall(calls));
 });
 
-test("other assistant errors surface their text", async (t) => {
+test("a CLI rate-limit error maps to the shared busy sentence", async (t) => {
 	const assistantError = JSON.stringify({
 		type: "assistant",
 		error: "rate_limit",
 		message: { content: [{ type: "text", text: "API Error: Rate limit reached" }] },
 	});
 	const { events } = await runScenario(t, [assistantError, exitWith(1, "")]);
-	assert.equal(getErrorMessage(events), "API Error: Rate limit reached");
+	assert.equal(getErrorMessage(events), "Claude is busy right now. Try again in a moment.");
 });
 
-test("result error before message_stop surfaces the result text", async (t) => {
+test("result error before message_stop maps through the shared vocabulary", async (t) => {
 	const resultError = JSON.stringify({
 		type: "result",
 		subtype: "error_during_execution",
@@ -478,7 +478,7 @@ test("result error before message_stop surfaces the result text", async (t) => {
 		result: "Credit balance is too low",
 	});
 	const { events } = await runScenario(t, [resultError, HOLD]);
-	assert.equal(getErrorMessage(events), "Credit balance is too low");
+	assert.equal(getErrorMessage(events), "This request was billed to API credits and the balance is too low.");
 });
 
 test("result error without result text surfaces its errors", async (t) => {
@@ -636,6 +636,27 @@ test("writes one user prompt after local-only control initialization and summary
 	assert(lines.slice(3).every((line) => JSON.parse(line).request.detail === "summary"));
 });
 
+test("a plan-limit warning rides the message as cliNotice without failing the turn", async (t) => {
+	const lines = readFixtureLines("text.jsonl");
+	const warning = JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "allowed_warning", resetsAt: Math.floor(Date.now() / 1000) + 3 * 3600, rateLimitType: "five_hour" }, uuid: "u", session_id: "s" });
+	const { events, calls } = await runScenario(t, [lines[0]!, warning, ...lines.slice(1)]);
+
+	const done = getLastEvent(events);
+	assert.ok(done.type === "done");
+	assert.match((done.message as { cliNotice?: string }).cliNotice ?? "", /^Claude plan limit almost reached. It resets in 3 hours. Switch this lesson to your API key/);
+
+	await assertCleanedUp(getOnlyCall(calls));
+});
+
+test("an allowed rate_limit_event leaves no cliNotice", async (t) => {
+	const lines = readFixtureLines("text.jsonl");
+	const allowed = JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "allowed", resetsAt: 1 }, uuid: "u", session_id: "s" });
+	const { events } = await runScenario(t, [lines[0]!, allowed, ...lines.slice(1)]);
+	const done = getLastEvent(events);
+	assert.ok(done.type === "done");
+	assert.equal("cliNotice" in done.message, false);
+});
+
 test("the CLI init event's resolved model rides the message as cliResolvedModel", async (t) => {
 	const { events, calls } = await runScenario(t, readFixtureLines("text.jsonl"));
 
@@ -655,7 +676,7 @@ test("parseCliLine reads the init model, and ignores an init without one", () =>
 	assert.equal(parseCliLine('{"type":"system","subtype":"status","model":"claude-opus-5-5"}'), null);
 });
 
-test("parseCliLine ignores non-JSON, system, rate-limit and successful result lines", () => {
+test("parseCliLine ignores non-JSON, system, allowed rate-limit and successful result lines", () => {
 	assert.equal(parseCliLine("not json"), null);
 	assert.equal(parseCliLine("null"), null);
 	assert.equal(parseCliLine('{"type":"system","subtype":"init"}'), null);

@@ -21,6 +21,7 @@ import { createClaudeCodeProvider } from "./claude-code/provider.ts";
 import { streamClaudeCode } from "./claude-code/stream.ts";
 import { nativeSubscriptionId, nativeSubscriptionModel } from "./subscription-bridge.ts";
 import { nativeSubscriptionStream } from "./subscription-stream.ts";
+import { mapStreamErrors } from "./map-stream-errors.ts";
 
 /** App identity is immutable and shared by Models and every native Agent.
  * Agent's default Pi attribution otherwise overrides the Models identity. */
@@ -172,7 +173,9 @@ export function piEngineForSpec(spec: ResolvedModelSpec, background: boolean | (
 			const requestOptions = { ...options, reasoning: level === "off" ? undefined : level };
 			const purpose = typeof background === "function" ? background : () => background;
 			const stream = spec.provider === "chatgpt" ? chatGPTStream(purpose, lifecycle) : nativeId ? nativeSubscriptionStream(models.getProvider(nativeId)!, purpose, lifecycle) : models.streamSimple.bind(models);
-			return stream(requestModel, context, requestOptions);
+			// The Anthropic API says rate limits, bad keys and low credit in its own words; the CLI
+			// backend maps its own, so both show the learner the same sentence.
+			return spec.provider === "anthropic" ? mapStreamErrors(stream(requestModel, context, requestOptions)) : stream(requestModel, context, requestOptions);
 		},
 	};
 }

@@ -1,5 +1,7 @@
 import type { Usage } from "@earendil-works/pi-ai";
 
+import { rateLimitNotice } from "../../core/cli-errors.ts";
+
 export type CliUsage = Partial<Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite">>;
 
 export type CliToolResult = { id: string; isError: boolean; text: string };
@@ -8,6 +10,7 @@ export type CliBlock = { type: "text" } | { type: "thinking" } | { type: "toolUs
 
 export type CliEvent =
 	| { type: "init"; model: string }
+	| { type: "rateLimit"; notice: string }
 	| { type: "messageStart"; usage: CliUsage }
 	| { type: "blockStart"; index: number; block: CliBlock }
 	| { type: "textDelta"; index: number; text: string }
@@ -179,6 +182,12 @@ export function parseCliLine(text: string): CliEvent | null {
 		// requested alias to (opus -> claude-opus-5-5); only a non-empty string counts.
 		case "system":
 			return line.subtype === "init" && typeof line.model === "string" && line.model !== "" ? { type: "init", model: line.model } : null;
+
+		// Only a warning or rejected status says anything; allowed or malformed gives null.
+		case "rate_limit_event": {
+			const notice = rateLimitNotice(parsed);
+			return notice === null ? null : { type: "rateLimit", notice };
+		}
 
 		case "stream_event":
 			return line.event ? parseStreamEvent(line.event) : null;

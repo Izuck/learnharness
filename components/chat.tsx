@@ -40,6 +40,7 @@ import {
 	firstSourceTextParts,
 	cliContextWindowOf,
 	cliResolvedModelOf,
+	cliNoticeOf,
 	messageAnchorId,
 	textPartMessageId,
 	kbdEventForAction as kbdEventForChat,
@@ -1653,6 +1654,12 @@ export function Chat({
 								</span>
 							)}
 							{openingError && <p role="alert" className="text-sm text-destructive">{OPENING_PROMPT_FAILURE}</p>}
+							{/* A warning, not a failure: the same banner shape as the error below, in the muted register, and never in its place. */}
+							{!error && cliNoticeOf(nativeMessages) && (
+								<div role="status" data-testid="cli-notice" className="rounded-lg border border-border bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
+									{cliNoticeOf(nativeMessages)}
+								</div>
+							)}
 							{error && (
 								<div className="flex items-center justify-between gap-3 rounded-lg border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm">
 									<span>Something went wrong: {error.message}</span>

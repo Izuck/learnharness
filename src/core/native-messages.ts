@@ -100,6 +100,10 @@ export type LhMessage = (UserMessage | AssistantMessage | ToolResultMessage | Lh
 	 * (opus -> claude-opus-5-5), from its session-start event. App-only
 	 * metadata beside cliContextWindow: never sent as message content. */
 	cliResolvedModel?: string;
+	/** A non-blocking note from the CLI about the response, e.g. the plan limit
+	 * is nearly used up (from its rate_limit_event). App-only metadata: never
+	 * sent as message content. */
+	cliNotice?: string;
 };
 
 /** Latest response only: never borrow an older process/model's window when
@@ -127,6 +131,18 @@ export function cliResolvedModelOf(messages: readonly LhMessage[]): { model: str
 		const resolved = message.cliResolvedModel;
 		return message.provider === CLAUDE_CODE_PROVIDER && typeof resolved === "string" && resolved !== ""
 			? { model: `${message.provider}:${message.model}`, resolved } : null;
+	}
+	return null;
+}
+
+/** The note the latest assistant response carries, for the transcript's
+ * non-blocking banner; null when that response has none. Latest-only, like
+ * the other cli* readers: a later clean response clears it. */
+export function cliNoticeOf(messages: readonly LhMessage[]): string | null {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i]!;
+		if (message.role !== "assistant") continue;
+		return typeof message.cliNotice === "string" && message.cliNotice !== "" ? message.cliNotice : null;
 	}
 	return null;
 }
@@ -664,7 +680,7 @@ export function toLlmMessages(messages: readonly AgentMessage[]): Message[] {
 			continue;
 		}
 		// Strip app-only id/CLI context metadata: the wire carries the native shape only.
-		const { id: _id, cliContextWindow: _cliContextWindow, cliResolvedModel: _cliResolvedModel, ...native } = m as LhMessage;
+		const { id: _id, cliContextWindow: _cliContextWindow, cliResolvedModel: _cliResolvedModel, cliNotice: _cliNotice, ...native } = m as LhMessage;
 		out.push(native as Message);
 		// Repair unanswered calls from completed generations, not calls in
 		// failed generations. Pi filters error/aborted assistants itself;
