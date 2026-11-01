@@ -7,6 +7,7 @@ import {
 	type Models,
 	type MutableModels,
 	type StreamFunction,
+	type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { lazyApi, lazyStream } from "@earendil-works/pi-ai/api/lazy";
@@ -22,6 +23,8 @@ import { streamClaudeCode } from "./claude-code/stream.ts";
 import { nativeSubscriptionId, nativeSubscriptionModel } from "./subscription-bridge.ts";
 import { nativeSubscriptionStream } from "./subscription-stream.ts";
 import { mapStreamErrors } from "./map-stream-errors.ts";
+import { CLAUDE_CODE_PROVIDER } from "./claude-code/constants.ts";
+import { stripForeignThinking } from "../core/cross-backend.ts";
 
 /** App identity is immutable and shared by Models and every native Agent.
  * Agent's default Pi attribution otherwise overrides the Models identity. */
@@ -52,6 +55,19 @@ export interface PiEngine {
 }
 
 export type { ThinkingLevel };
+
+/** The two Anthropic backends a lesson can move between (spec H). */
+const ANTHROPIC_BACKENDS: ReadonlySet<string> = new Set(["anthropic", CLAUDE_CODE_PROVIDER]);
+
+/** The history as the target backend should see it: thinking the OTHER Anthropic backend
+ *  produced is dropped (the CLI loses signatures; API thinking is not the CLI's to replay).
+ *  Applied once, in every engine's stream function, so conversation agents and sub-agents
+ *  share it. Deterministic, so the CLI's live-process continuation check still matches. */
+export function contextForBackend(context: TranscriptContext, target: { provider: string }): TranscriptContext {
+	if (!ANTHROPIC_BACKENDS.has(target.provider)) return context;
+	const messages = stripForeignThinking(context.messages, target);
+	return messages.some((m, i) => m !== context.messages[i]) ? { ...context, messages } : context;
+}
 
 let collection: ReturnType<typeof createModels> | undefined;
 interface ProviderSource {
@@ -156,7 +172,8 @@ export function piEngineForSpec(spec: ResolvedModelSpec, background: boolean | (
 		// The agent loop forwards state.thinkingLevel as `reasoning` (undefined
 		// = off on pi-ai's scale). Built-ins keep the factory clamp; custom
 		// requests re-resolve thinking against their current metadata below.
-		streamFn: (requestModel, context, options) => {
+		streamFn: (requestModel, rawContext, options) => {
+			const context = contextForBackend(rawContext, requestModel);
 			if (custom) {
 				// Revalidate before EVERY upstream model operation, including later
 				// tool-loop steps. Resolve thinking from the ORIGINAL preference (or
