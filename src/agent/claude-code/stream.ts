@@ -273,6 +273,7 @@ class ClaudeTurn {
 		// A bridge preview that never completed cannot be admitted; the next message restarts block indexes.
 		this.withdrawUnadmitted(() => false);
 		this.contentIndexes.clear();
+		this.partialJson.clear();
 		this.output.stopReason = "pending";
 		return "resumed";
 	}
@@ -380,7 +381,7 @@ class ClaudeTurn {
 					this.lastIgnoredNativeName = block.name;
 					return;
 				}
-					// Shown while it streams, like the API provider; only admission (toolcall_end) makes it real.
+				// Shown while it streams, like the API provider; only admission (toolcall_end) makes it real.
 				this.contentIndexes.set(index, contentIndex);
 				this.output.content.push({ type: "toolCall", id: block.id, name: toolNameFromMcp(block.name), arguments: {} });
 				this.stream.push({ type: "toolcall_start", contentIndex, partial: this.output });
@@ -414,8 +415,8 @@ class ClaudeTurn {
 
 			case "toolCall":
 				Object.assign(block, parseToolCallArguments(this.partialJson.get(index) ?? ""));
-					this.partialJson.delete(index);
-					this.intents.push(block);
+				this.partialJson.delete(index);
+				this.intents.push(block);
 				return;
 		}
 	}
@@ -452,6 +453,9 @@ class ClaudeTurn {
 			return;
 		}
 
+		// A finished answer admitted nothing, and pi-agent-core runs the tool calls of any final message
+		// that is not an error, abort or cut-off: no streamed preview may ride it.
+		if (stopReason === "stop") this.withdrawUnadmitted(() => false);
 		this.finished = true;
 		this.stream.push({ type: "done", reason: stopReason, message: this.output });
 		this.stream.end();

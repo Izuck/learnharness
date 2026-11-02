@@ -218,3 +218,43 @@ test("a native tool block is still never shown beside a streamed bridge call", a
 	assert.deepEqual(finalMessage(seen).content.map((block) => block.type === "toolCall" && block.name), ["send_to_user"]);
 	assert.deepEqual([...new Set(toolEventIndexes(seen))], [0]);
 });
+
+test("a streamed bridge call in a message that ends the turn (end_turn) is withdrawn, so nothing can execute it", async (t) => {
+	// pi-agent-core runs the tool calls of any final message that is not an error, abort or cut-off.
+	const seen = await run(t, [
+		streamEvent({ type: "message_start", message: { usage: {} } }),
+		...textBlock(0, "All done."),
+		...streamedToolBlock(1, SEND_ID, "send_to_user", SEND_CHUNKS),
+		streamEvent({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: {} }),
+		streamEvent({ type: "message_stop" }),
+		HOLD,
+	]);
+
+	assert.ok(seen.some(({ event }) => event.type === "toolcall_start"), "the preview did stream");
+	assert.equal(seen.some(({ event }) => event.type === "toolcall_end"), false);
+	const final = finalMessage(seen);
+	assert.equal(seen.at(-1)?.event.type, "done");
+	assert.equal(final.stopReason, "stop");
+	assert.deepEqual(final.content, [{ type: "text", text: "All done." }]);
+});
+
+test("a bridge preview left unfinished in a native-only message leaves no partial input for the next message's block", async (t) => {
+	t.mock.method(console, "warn", () => {});
+	const seen = await run(t, [
+		...toolMessage([
+			streamEvent({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_native", name: "Read", input: {} } }),
+			streamEvent({ type: "content_block_stop", index: 0 }),
+			// Never stopped, so never an intent: the message stays native-only.
+			streamEvent({ type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "toolu_unfinished", name: "mcp__learnharness__send_to_user", input: {} } }),
+			streamEvent({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '{"message":"stale' } }),
+		]),
+		JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "toolu_native", is_error: true, content: "No such tool available: Read" }] } }),
+		...toolMessage([...textBlock(0, "Then:"), ...streamedToolBlock(1, SEND_ID, "send_to_user", SEND_CHUNKS)]),
+		JSON.stringify({ fake: "call", id: SEND_ID, name: "send_to_user", arguments: { message: "Hello world" } }),
+		HOLD,
+	]);
+
+	const final = finalMessage(seen);
+	assert.equal(final.stopReason, "toolUse", final.errorMessage);
+	assert.deepEqual(final.content.filter((block) => block.type === "toolCall"), [{ type: "toolCall", id: SEND_ID, name: "send_to_user", arguments: { message: "Hello world" } }]);
+});
