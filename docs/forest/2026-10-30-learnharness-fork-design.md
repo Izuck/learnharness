@@ -64,7 +64,7 @@ Isaac (an engineering student at Georgia Tech) wants to learn STEM properly befo
 
 **What it is.** One file holding every topic of these degrees:
 - mathematics, physics, electrical engineering, computer science, chemistry, mechanical engineering, biology, earth & space science.
-- computer, civil, environmental and nuclear engineering (Isaac, 2026-11-02): smaller connecting fields whose anchors sit between the degrees they draw on.
+- computer, civil, environmental and nuclear engineering, and materials science & engineering (Isaac, 2026-11-02): smaller connecting fields whose anchors sit between the degrees they draw on.
 - *(builder's call: Science Bowl's categories plus the three engineering/CS degrees Isaac's work touches; the list is a config array so Isaac can add degrees)*
 
 **Topic grain.** About one lecture-week of a standard course, for example "Gaussian quadrature" or "pn junctions", not "Numerical methods" and not a single formula. Each topic has:

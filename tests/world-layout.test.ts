@@ -58,10 +58,10 @@ function fixture(perDegree: number): WorldTopic[] {
 }
 
 describe("world layout", () => {
-	it("declares the twelve degrees, each with an anchor", () => {
+	it("declares the thirteen degrees, each with an anchor", () => {
 		assert.deepEqual(
 			WORLD_DEGREES.map((d) => d.id),
-			["math", "physics", "ee", "cs", "chemistry", "me", "biology", "earth-space", "compe", "civil", "env", "nuclear"],
+			["math", "physics", "ee", "cs", "chemistry", "me", "biology", "earth-space", "compe", "civil", "env", "nuclear", "matsci"],
 		);
 		for (const d of WORLD_DEGREES) assert.ok(DEGREE_ANCHORS[d.id], `anchor for ${d.id}`);
 	});
