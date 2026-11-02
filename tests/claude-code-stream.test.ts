@@ -472,6 +472,34 @@ test("a CLI rate-limit error maps to the shared busy sentence", async (t) => {
 	assert.equal(getErrorMessage(events), "Claude is busy right now. Try again in a moment.");
 });
 
+test("a rejected rate_limit_event decides the error sentence of the failure that follows it", async (t) => {
+	const rejected = JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "rejected", resetsAt: 4_000_000_000 } });
+	const assistantError = JSON.stringify({ type: "assistant", error: "rate_limit", message: { content: [{ type: "text", text: "API Error: Rate limit reached" }] } });
+	const { events } = await runScenario(t, [rejected, assistantError, exitWith(1, "")]);
+	assert.match(getErrorMessage(events) ?? "", /^Claude plan limit reached\. It resets in \d+ days\. Switch this lesson/);
+	const last = getLastEvent(events);
+	assert.ok(last.type === "error");
+	assert.deepEqual((last.error as { cliRateLimit?: unknown }).cliRateLimit, { status: "rejected", resetsAt: 4_000_000_000 }, "the plan-limit note reads the same report off the failed message");
+});
+
+test("a rejected rate_limit_event also decides a result-line failure", async (t) => {
+	const rejected = JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "rejected", resetsAt: 4_000_000_000 } });
+	const resultError = JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, result: "Something the CLI worded oddly" });
+	const { events } = await runScenario(t, [rejected, resultError, HOLD]);
+	assert.match(getErrorMessage(events) ?? "", /^Claude plan limit reached\./);
+});
+
+test("a CLI that exits after a rejected rate_limit_event gets the plan-limit sentence, not the bare exit code", async (t) => {
+	const rejected = JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "rejected", resetsAt: 4_000_000_000 } });
+	const { events } = await runScenario(t, [rejected, exitWith(1, "")]);
+	assert.match(getErrorMessage(events) ?? "", /^Claude plan limit reached\. It resets in \d+ days\./);
+});
+
+test("a CLI that exits with no rate-limit report keeps the exit-code message", async (t) => {
+	const { events } = await runScenario(t, [exitWith(1, "")]);
+	assert.equal(getErrorMessage(events), "claude CLI exited with code 1");
+});
+
 test("result error before message_stop maps through the shared vocabulary", async (t) => {
 	const resultError = JSON.stringify({
 		type: "result",

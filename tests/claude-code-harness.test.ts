@@ -26,14 +26,14 @@ process.env.LH_DATA_DIR = testData;
 after(() => rmSync(testData, { recursive: true, force: true }));
 const { PATHS, SETTINGS_FILE } = await import("../config.ts");
 const { readSettings, writeSettings } = await import("../src/store/settings.ts");
-const { addIdleProcess, killAllLiveProcesses, LIVE_PROCESS_IDLE_TIMEOUT_MS, liveProcessIdleTimeoutMs } = await import("../src/agent/claude-code/live-processes.ts");
+const { addIdleProcess, addLiveProcess, killAllLiveProcesses, LIVE_PROCESS_IDLE_TIMEOUT_MS, liveProcessIdleTimeoutMs } = await import("../src/agent/claude-code/live-processes.ts");
 const { CLAUDE_CODE_MODELS } = await import("../src/agent/claude-code/provider.ts");
 const { createClaudeCodeStreamFunction } = await import("../src/agent/claude-code/stream.ts");
 const { createTeacherAgent } = await import("../src/agent/teacher-agent.ts");
 const { cliContextWindowOf, danglingQuestionOf } = await import("../src/core/native-messages.ts");
 const { handleChatRequest } = await import("../src/server/chat-handler.ts");
-const { saveChatSettings } = await import("../src/server/chats.ts");
-const { isTurnRunning } = await import("../src/server/turn-liveness.ts");
+const { deleteChatSession, saveChatSettings } = await import("../src/server/chats.ts");
+const { beginTurn, endTurn, isTurnRunning } = await import("../src/server/turn-liveness.ts");
 const { runningTurn } = await import("../src/server/turn-runs.ts");
 const { chatStore } = await import("../src/store/chats.ts");
 
@@ -405,4 +405,81 @@ test("moving a lesson to another model or backend ends its kept CLI process; oth
 	keep("on opus");
 	saveChatSettings(chatId, {});
 	assert.deepEqual([...killed], ["kept", "on the API", "on opus"], "clearing the override moves the lesson to the default model");
+});
+
+for (const kind of ["idle", "waiting on an open question's tool result"] as const) test(`deleting a lesson ends its CLI process (${kind}) and no other lesson's`, async (t) => {
+	t.after(() => killAllLiveProcesses());
+	const lesson = chatStore.createChat("Deleted lesson");
+	const other = chatStore.createChat("Surviving lesson");
+	t.after(() => { for (const id of [lesson.id, other.id]) rmSync(join(PATHS.chats, `${id}.json`), { force: true }); });
+	const killed: string[] = [];
+	const register = kind === "idle" ? addIdleProcess : addLiveProcess;
+	register({ owner: Symbol("deleted"), sessionId: lesson.id, kill: () => killed.push("deleted lesson") });
+	addIdleProcess({ owner: Symbol("other"), sessionId: other.id, kill: () => killed.push("other lesson") });
+
+	assert.equal((await deleteChatSession("chat_missing_for_live_session", "preserve-graph")).ok, false);
+	assert.deepEqual([...killed], [], "a refused delete (no such lesson) ends nothing");
+	beginTurn(lesson.id);
+	assert.equal((await deleteChatSession(lesson.id, "preserve-graph")).ok, false);
+	endTurn(lesson.id);
+	assert.deepEqual([...killed], [], "a delete refused because a turn is running keeps the lesson's process");
+
+	assert.equal((await deleteChatSession(lesson.id, "preserve-graph")).ok, true);
+	assert.deepEqual([...killed], ["deleted lesson"]);
+	assert.equal(chatStore.getChat(other.id)?.id, other.id);
+});
+
+test("send_to_user + a question: the question's card stays on the wire through the CLI round trip between the two admissions", async (t) => {
+	// The bridge admits the batch one call at a time, so the question previews in message 1, leaves it
+	// when send_to_user alone is admitted, and used to come back only when the CLI's next MCP call
+	// admitted it (here 300ms later): the card blinked out for the whole round trip.
+	const SEND_ID = "toolu_batch_send";
+	const SEND_INPUT = { message: "Let me ask you something." };
+	const block = (index: number, id: string, name: string, input: object) => [
+		streamEvent({ type: "content_block_start", index, content_block: { type: "tool_use", id, name: `mcp__learnharness__${name}`, input: {} } }),
+		streamEvent({ type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: JSON.stringify(input) } }),
+		streamEvent({ type: "content_block_stop", index }),
+	];
+	const fakeRun = createFakeRun(t, [[
+		streamEvent({ type: "message_start", message: { usage: {} } }),
+		...block(0, SEND_ID, "send_to_user", SEND_INPUT),
+		...block(1, ASK_ID, "ask_user_question", ASK_INPUT),
+		streamEvent({ type: "message_delta", delta: { stop_reason: "tool_use" }, usage: {} }),
+		streamEvent({ type: "message_stop" }),
+		JSON.stringify({ fake: "call", id: SEND_ID, name: "send_to_user", arguments: SEND_INPUT }),
+		JSON.stringify({ fake: "sleep", ms: 300 }),
+		JSON.stringify({ fake: "call", id: ASK_ID, name: "ask_user_question", arguments: ASK_INPUT }),
+		JSON.stringify({ fake: "reply" }),
+	]]);
+	const factory = createAgentFactory(fakeRun);
+	const chatId = createClaudeCodeChat(t);
+	const ack = await handleChatRequest(new Request("http://test/api/chat", { method: "POST", headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ chatId, input: { type: "text", text: "teach me sockets" } }) }), factory);
+	assert.equal(ack.status, 200);
+	const handle = runningTurn(chatId);
+	assert.ok(handle);
+
+	type Frame = { at: number; event: { type: string; toolCallId?: string; message?: { role?: string; content?: Array<{ type: string; id?: string }> } } };
+	const frames: Frame[] = [];
+	const reader = handle.subscribe().getReader();
+	const decoder = new TextDecoder();
+	let buffered = "";
+	for (let chunk = await reader.read(); !chunk.done; chunk = await reader.read()) {
+		buffered += decoder.decode(chunk.value, { stream: true });
+		const parts = buffered.split("\n\n");
+		buffered = parts.pop() ?? "";
+		for (const part of parts) if (part.startsWith("data: ") && !part.includes("[DONE]")) frames.push({ at: Date.now(), event: JSON.parse(part.slice(6)) });
+	}
+	while (isTurnRunning(chatId)) await sleep(10);
+
+	const carriesAsk = (frame: Frame) => frame.event.message?.role === "assistant" && frame.event.message.content?.some((b) => b.type === "toolCall" && b.id === ASK_ID);
+	const sendEnded = frames.findIndex((f) => f.event.type === "tool_execution_end" && f.event.toolCallId === SEND_ID);
+	assert.ok(sendEnded >= 0, "send_to_user ran");
+	const afterSend = frames.slice(sendEnded + 1);
+	const reshown = afterSend.find(carriesAsk);
+	const askRan = afterSend.find((f) => f.event.type === "tool_execution_start" && f.event.toolCallId === ASK_ID);
+	assert.ok(reshown && askRan, "the question reappears in message 2 and then runs");
+	assert.ok(askRan.at - reshown.at >= 200, `the question's card was back ${askRan.at - reshown.at}ms before it was admitted`);
+	assert.equal(danglingQuestionOf(chatStore.getChat(chatId)?.messages ?? [])?.toolCallId, ASK_ID, "and it is the pending question once the turn settles");
+	killAllLiveProcesses();
 });

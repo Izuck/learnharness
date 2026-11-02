@@ -22,6 +22,7 @@ import {
 	toCliModelId,
 } from "../src/core/backend-parity.ts";
 import type { UserSettings } from "../src/core/settings.ts";
+import { addIdleProcess, addLiveProcess, killAllLiveProcesses, liveGeneration } from "../src/agent/claude-code/live-processes.ts";
 
 // An empty auth store for this process: the route's availability check reads
 // the real key seam, and a developer machine's saved Anthropic key must not
@@ -236,6 +237,34 @@ describe("POST /api/settings/backend", () => {
 		assert.deepEqual(record.models?.cheap?.model, { provider: "anthropic", id: "claude-haiku-5-5" });
 		assert.deepEqual(record.agent?.models?.researcher?.model, { provider: "anthropic", id: "claude-sonnet-5-5" });
 		assert.deepEqual(record.graph, { enabled: false });
+	});
+
+	it("a switch to the API ends every live CLI process, idle or waiting on an open question, and stales streaming ones", async (t) => {
+		t.after(() => killAllLiveProcesses());
+		seed({ version: 1, ...available, models: { strong: { model: { provider: "claude-code", id: "opus" } } } });
+		const killed: string[] = [];
+		const fake = (name: string, sessionId: string) => ({ owner: Symbol(name), sessionId, kill: () => killed.push(name) });
+		addIdleProcess(fake("idle lesson", "lesson-idle"));
+		addLiveProcess(fake("lesson with an open question", "lesson-asking"));
+		const generation = liveGeneration();
+		assert.equal((await post({ to: "anthropic" })).status, 200);
+		assert.deepEqual([...killed].sort(), ["idle lesson", "lesson with an open question"]);
+		assert.equal(liveGeneration(), generation + 1, "processes streaming now are marked stale");
+	});
+
+	it("a switch to the CLI, or one that is refused, ends nothing", async (t) => {
+		t.after(() => killAllLiveProcesses());
+		const killed: string[] = [];
+		const generation = liveGeneration();
+		addIdleProcess({ owner: Symbol("idle"), sessionId: "lesson-idle", kill: () => killed.push("idle") });
+		seed({ version: 1, ...available, models: { strong: { model: { provider: "anthropic", id: "claude-opus-5-5" } } } });
+		assert.equal((await post({ to: "claude-code" })).status, 200);
+		const present = process.env[KEY_VAR];
+		delete process.env[KEY_VAR];
+		t.after(() => { process.env[KEY_VAR] = present; });
+		assert.equal((await post({ to: "anthropic" })).status, 409);
+		assert.deepEqual([...killed], []);
+		assert.equal(liveGeneration(), generation, "nothing is staled either");
 	});
 
 	it("reports unmapped ids and works with no record at all", async () => {

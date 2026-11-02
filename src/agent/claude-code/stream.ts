@@ -33,7 +33,7 @@ import { parseCliLine, type CliBlock, type CliEvent, type CliUsage } from "./cli
 import { ClaudeCodeError } from "./constants.ts";
 import { cliErrorMessage, type RateLimitInfo } from "../../core/cli-errors.ts";
 import { ContextWindowProbe } from "./context-window.ts";
-import { addIdleProcess, addLiveProcess, getLiveProcess, removeLiveProcess, type LiveProcess } from "./live-processes.ts";
+import { addIdleProcess, addLiveProcess, getLiveProcess, liveGeneration, removeLiveProcess, type LiveProcess } from "./live-processes.ts";
 import { configurationForReuse, conversationForReuse } from "./reuse-context.ts";
 import { BRIDGE_SERVER_NAME, createToolBridge, toolNameFromMcp, type PendingToolCall, type ToolBridge } from "./tool-bridge.ts";
 import { toClaudeInput, toContinuationContent, toStreamJsonLine } from "./transcript.ts";
@@ -153,8 +153,8 @@ function isBridgeToolName(name: string): boolean {
 }
 
 // The CLI's own words for a failed response, in the app's shared error vocabulary.
-function getAssistantErrorMessage(error: string, text: string): string {
-	return cliErrorMessage(text || error, "claude-code", { code: error });
+function getAssistantErrorMessage(error: string, text: string, rateLimit: RateLimitInfo | undefined): string {
+	return cliErrorMessage(text || error, "claude-code", { code: error, rateLimit });
 }
 
 class ClaudeTurn {
@@ -166,6 +166,10 @@ class ClaudeTurn {
 	// output.content is only a preview of the model's intent and must be withdrawn
 	// before the message settles (see withdrawUnadmitted).
 	private readonly admittedCalls = new Set<ToolCall>();
+	// Previews shown again at the start of a continued turn for calls the bridge has not admitted
+	// yet (see carryPreviews). Like every preview they leave the message through withdrawUnadmitted
+	// (admit, finish, fail); dropCarried is only a narrower, earlier withdrawal.
+	private carried: ToolCall[] = [];
 	private ignoredNativeInMessage = 0;
 	private nativeOnlyMessages = 0;
 	lastIgnoredNativeName = "";
@@ -185,6 +189,9 @@ class ClaudeTurn {
 
 		switch (event.type) {
 			case "messageStart":
+				// Defence: the process fails a message that starts while calls are unadmitted
+				// (handleLine), so this normally sees nothing carried.
+				this.dropCarried();
 				this.ignoredNativeInMessage = 0;
 				this.updateUsage(event.usage);
 				this.start();
@@ -249,11 +256,11 @@ class ClaudeTurn {
 				return;
 
 			case "assistantError":
-				this.fail(getAssistantErrorMessage(event.error, event.text), "error");
+				this.fail(getAssistantErrorMessage(event.error, event.text, this.output.cliRateLimit), "error");
 				return;
 
 			case "resultError":
-				this.fail(cliErrorMessage(event.text, "claude-code"), "error");
+				this.fail(cliErrorMessage(event.text, "claude-code", { rateLimit: this.output.cliRateLimit }), "error");
 				return;
 		}
 	}
@@ -280,6 +287,8 @@ class ClaudeTurn {
 
 	getMessage(): AssistantMessage { return this.output; }
 
+	getRateLimit(): RateLimitInfo | undefined { return this.output.cliRateLimit; }
+
 	setContextWindow(tokens: number | undefined): void {
 		if (!this.finished && tokens !== undefined) this.output.cliContextWindow = tokens;
 	}
@@ -289,6 +298,41 @@ class ClaudeTurn {
 		if (!this.trailerPending) return;
 		this.trailerPending = false;
 		if (!this.finished) this.finish();
+	}
+
+	/**
+	 * The CLI runs MCP tools one at a time, so a batch reaches the bridge call by call: message 1
+	 * admits the first and drops the others' previews (pi would execute whatever it carries), and
+	 * the CLI asks for the next only once pi has returned the first's result. Showing the preview
+	 * again at the start of the continued turn, rather than at that call's admission, keeps the card
+	 * on screen through the CLI's round trip instead of blinking out and back. It is a preview like
+	 * any other: only an authenticated MCP call (admit) makes it real, and anything else withdraws it
+	 * (the CLI starting a message, a cancelled call, the turn ending, a failure).
+	 */
+	carryPreviews(calls: ToolCall[]): void {
+		if (this.finished) return;
+		const fresh = calls.filter((call) => !this.output.content.includes(call));
+		if (fresh.length === 0) return;
+		this.start();
+		for (const call of fresh) {
+			const contentIndex = this.output.content.length;
+			this.output.content.push(call);
+			this.carried.push(call);
+			this.stream.push({ type: "toolcall_start", contentIndex, partial: this.output });
+		}
+	}
+
+	/**
+	 * Withdraws carried previews (all, or the one with `id`) ahead of the turn's own settling. A defence
+	 * rather than the safety mechanism: the safety is that only admit() emits toolcall_end and
+	 * admit/finish/fail withdraw every other preview. Only called before this turn streams a block of
+	 * its own, so no content index shifts under it.
+	 */
+	private dropCarried(id?: string): void {
+		const dropped = this.carried.filter((call) => id === undefined || call.id === id);
+		if (dropped.length === 0) return;
+		this.carried = this.carried.filter((call) => !dropped.includes(call));
+		this.withdrawUnadmitted((block) => !dropped.includes(block));
 	}
 
 	setRateLimit(info: RateLimitInfo): void {
@@ -308,6 +352,7 @@ class ClaudeTurn {
 	 */
 	admit(calls: ToolCall[]): void {
 		this.start();
+		this.carried = [];
 		this.withdrawUnadmitted((block) => calls.includes(block));
 		for (const call of calls) {
 			let contentIndex = this.output.content.indexOf(call);
@@ -325,7 +370,9 @@ class ClaudeTurn {
 
 	/** A cancelled call must not stay on screen as a card that can never run. */
 	withdraw(id: string): void {
-		if (this.finished || this.output.stopReason !== "toolUse") return;
+		if (this.finished) return;
+		this.dropCarried(id);
+		if (this.output.stopReason !== "toolUse") return;
 		this.withdrawUnadmitted((block) => block.id !== id);
 	}
 
@@ -527,6 +574,9 @@ class ClaudeProcess implements LiveProcess {
 	// A turn continued from idle that the process never answered (it exited before any output)
 	// replays on a fresh process instead of failing: nothing was shown or admitted yet.
 	private replayIfLost: (() => void) | undefined;
+	// The live-process generation this turn started under: the app moving lessons off the CLI bumps
+	// it, and a process from before the bump is ended instead of registered (see isStale).
+	private generation = liveGeneration();
 
 	constructor(
 		private readonly child: ChildProcessWithoutNullStreams,
@@ -540,6 +590,8 @@ class ClaudeProcess implements LiveProcess {
 	) {}
 
 	get isIdle(): boolean { return this.phase === "idle"; }
+
+	private get isStale(): boolean { return this.generation !== liveGeneration(); }
 
 	start(stdinLine: string, signal: AbortSignal | undefined): void {
 		this.child.once("close", (code: number | null) => this.handleClose(`claude CLI exited with code ${code}`));
@@ -586,6 +638,8 @@ class ClaudeProcess implements LiveProcess {
 		this.sourceComplete = this.sourceCalls.length > 0;
 		this.setSignal(signal);
 		if (this.stopping) return;
+		// The calls still waiting for their MCP request show from the first moment of this turn.
+		this.turn.carryPreviews(this.sourceCalls);
 		for (const call of admitted) {
 			const result = results.find((candidate) => candidate.toolCallId === call.id)!;
 			this.bridge.resolveToolCall(call, result);
@@ -648,7 +702,7 @@ class ClaudeProcess implements LiveProcess {
 		if (this.sessionId && this.phase === "awaitingResults" && this.turn.finished && this.toolCallIds.length > 0) this.pendingError = message;
 		this.turn.fail(message, "error");
 		this.kill();
-		if (this.pendingError) addLiveProcess(this);
+		if (this.pendingError && !this.isStale) addLiveProcess(this);
 	}
 
 	consumeFailure(owner: symbol, turn: ClaudeTurn): boolean {
@@ -698,10 +752,10 @@ class ClaudeProcess implements LiveProcess {
 		this.toolCallIds = pending.map((call) => call.id);
 		this.turn.admit(calls);
 		this.conversation.push(...structuredClone(conversationForReuse([this.turn.getMessage()])));
-		if (this.sessionId) {
+		if (this.sessionId && !this.isStale) {
 			this.phase = "awaitingResults";
 			addLiveProcess(this);
-		} else this.kill(); // No trusted scope: return the batch, then use fresh replay.
+		} else this.kill(); // No trusted scope, or lessons moved off the CLI meanwhile: return the batch, then use fresh replay.
 	}
 
 	private readonly abort = () => {
@@ -718,6 +772,7 @@ class ClaudeProcess implements LiveProcess {
 
 	private beginTurn(turn: ClaudeTurn): void {
 		this.turn = turn;
+		this.generation = liveGeneration();
 		this.turn.setContextWindow(this.contextWindow);
 		// The CLI reports init once per process: every later turn carries the model it resolved.
 		this.turn.setResolvedModel(this.resolvedModel);
@@ -837,7 +892,7 @@ class ClaudeProcess implements LiveProcess {
 		// a response that also streamed tool intents, MCP requests nobody admitted, or a conversation
 		// the CLI compacted on its own.
 		const clean = !this.compacted && message.stopReason === "stop" && this.turn.getIntents().length === 0 && this.bridge.getPendingToolCalls().length === 0;
-		if (this.sessionId && !this.stopping && !this.closed && clean) this.becomeIdle(message);
+		if (this.sessionId && !this.stopping && !this.closed && !this.isStale && clean) this.becomeIdle(message);
 		else this.kill();
 	}
 
@@ -872,7 +927,7 @@ class ClaudeProcess implements LiveProcess {
 		if (replay) {
 			console.warn("claude CLI ended before answering a continued message; replaying the lesson on a fresh process");
 			replay();
-		} else this.turn.fail(message, "error");
+		} else this.turn.fail(cliErrorMessage(message, "claude-code", { rateLimit: this.turn.getRateLimit() }), "error");
 		removeTurnResources(this.bridge, this.files).catch((error: unknown) => {
 			console.error("claude CLI cleanup failed:", error);
 		});

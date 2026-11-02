@@ -68,6 +68,10 @@ function planLimitMessage(raw: string, now: number): string {
 export interface ErrorOptions {
 	/** The CLI's structured error code on an assistant error line (`authentication_failed`, `billing_error`, ...). */
 	code?: string;
+	/** The CLI's plan-limit report for the response that failed (its latest `rate_limit_event`). A
+	 *  still-active "rejected" one is the structured plan-limit signal: the CLI words that failure
+	 *  like a plain 429, so the code and text cannot tell them apart. Text only matters without it. */
+	rateLimit?: RateLimitInfo | null;
 	now?: number;
 }
 
@@ -80,6 +84,7 @@ export function cliErrorMessage(raw: string, backend: ErrorBackend, options: Err
 		if (options.code === "authentication_failed") return NOT_SIGNED_IN_MESSAGE;
 		if (CREDIT.test(raw)) return CREDIT_MESSAGE;
 		if (SPEND_LIMIT.test(raw)) return SPEND_LIMIT_MESSAGE;
+		if (options.rateLimit?.status === "rejected" && rateLimitActive(options.rateLimit, now)) return planLimitNotice(options.rateLimit, now) ?? raw;
 		if (PLAN_LIMIT.test(raw)) return planLimitMessage(raw, now);
 		if (options.code === "billing_error") return CREDIT_MESSAGE;
 		if (CLI_NOT_SIGNED_IN.test(raw) || status === 401 || type === "authentication_error" || KEY_REJECTED_TEXT.test(raw)) return NOT_SIGNED_IN_MESSAGE;

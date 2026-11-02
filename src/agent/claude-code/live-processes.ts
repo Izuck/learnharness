@@ -39,6 +39,11 @@ const REGISTRY = Symbol.for("learnharness.claude-code.live-processes");
 const registry = globalThis as typeof globalThis & { [REGISTRY]?: Map<LiveProcess, Entry> };
 const liveProcesses = (registry[REGISTRY] ??= new Map<LiveProcess, Entry>());
 
+// Process-wide for the same reason (a re-evaluated module must see the bump).
+const GENERATION = Symbol.for("learnharness.claude-code.live-processes.generation");
+const generations = globalThis as typeof globalThis & { [GENERATION]?: { value: number } };
+const generationBox = (generations[GENERATION] ??= { value: 0 });
+
 function register(process: LiveProcess, idle: boolean, timeoutMs: number): void {
 	removeLiveProcess(process);
 	// One live process per lesson: a newer one supersedes whatever else that lesson left behind,
@@ -89,6 +94,24 @@ export function removeLiveProcess(process: LiveProcess): void {
 /** A run that is over (a sub-agent's single job) will send no next message: end its process now. */
 export function endLiveSession(sessionId: string): void {
 	for (const process of [...liveProcesses.keys()]) if (process.sessionId === sessionId) evict(process);
+}
+
+/**
+ * Ends every registered process, idle or waiting on tool results, and marks the ones that are
+ * streaming right now stale: when the app moves lessons off the CLI, nothing the CLI holds will be
+ * continued. A learner's answer to an open question runs on the new backend and costs one replay,
+ * the same trade saveChatSettings makes. A process streaming at this moment is not registered yet;
+ * its owner compares liveGeneration() with the one it started under and ends it, rather than
+ * registering it, when its turn finishes.
+ */
+export function endAllLiveSessions(): void {
+	generationBox.value++;
+	killAllLiveProcesses();
+}
+
+/** Bumped by endAllLiveSessions; a process started under an older value must not be registered. */
+export function liveGeneration(): number {
+	return generationBox.value;
 }
 
 /** Kills every kept process (server shutdown). Kills are synchronous, so this is safe in an exit handler. */

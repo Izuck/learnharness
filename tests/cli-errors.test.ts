@@ -72,6 +72,28 @@ test("an unknown string passes through unchanged, and mapping is idempotent", ()
 	}
 });
 
+test("a rejected rate_limit_event is the structured plan-limit signal, whatever the error text says", () => {
+	const rateLimit = { status: "rejected" as const, resetsAt: Math.floor(NOW / 1000) + 25 * 60 };
+	const PLAN = "Claude plan limit reached. It resets in 25 minutes. Switch this lesson to your API key to keep going.";
+	assert.equal(cliErrorMessage("Something the CLI worded oddly", "claude-code", { code: "rate_limit", rateLimit, now: NOW }), PLAN);
+	assert.equal(cliErrorMessage("Something the CLI worded oddly", "claude-code", { rateLimit, now: NOW }), PLAN);
+	// The generic busy wording is the same line the plan limit arrives in: the structured report decides.
+	assert.equal(cliErrorMessage("API Error: Rate limit reached", "claude-code", { code: "rate_limit", rateLimit, now: NOW }), PLAN);
+	// Without the report the same text stays "busy"; the code alone never claims a plan limit.
+	assert.equal(cliErrorMessage("API Error: Rate limit reached", "claude-code", { code: "rate_limit", now: NOW }), BUSY);
+	assert.equal(cliErrorMessage("Something the CLI worded oddly", "claude-code", { code: "rate_limit", now: NOW }), "Something the CLI worded oddly");
+	// A warning is not a rejection; a rejection whose reset has passed is stale.
+	const warning = { status: "allowed_warning" as const, resetsAt: rateLimit.resetsAt };
+	assert.equal(cliErrorMessage("Something the CLI worded oddly", "claude-code", { rateLimit: warning, now: NOW }), "Something the CLI worded oddly");
+	assert.equal(cliErrorMessage("Something the CLI worded oddly", "claude-code", { rateLimit: { status: "rejected", resetsAt: rateLimit.resetsAt - 3600 }, now: NOW }), "Something the CLI worded oddly");
+	// A reset time the report lacks reads "soon"; a more specific cause (billing, sign-in) still wins.
+	assert.equal(cliErrorMessage("Something the CLI worded oddly", "claude-code", { rateLimit: { status: "rejected" }, now: NOW }), "Claude plan limit reached. It resets soon. Switch this lesson to your API key to keep going.");
+	assert.equal(cliErrorMessage("Credit balance is too low", "claude-code", { rateLimit, now: NOW }), CREDIT);
+	assert.equal(cliErrorMessage("Something odd", "claude-code", { code: "authentication_failed", rateLimit, now: NOW }), SIGNED_OUT);
+	// The API backend has no such report.
+	assert.equal(cliErrorMessage("Something the CLI worded oddly", "anthropic", { rateLimit, now: NOW }), "Something the CLI worded oddly");
+});
+
 const eventLine = (info: object) => ({ type: "rate_limit_event", rate_limit_info: info, uuid: "u", session_id: "s" });
 
 test("rateLimitNotice speaks for a rejected or warning event and is silent for an allowed one", () => {

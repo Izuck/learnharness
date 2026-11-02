@@ -11,6 +11,7 @@
 
 import { BACKEND_UNAVAILABLE_REASON, BACKGROUND_MODEL_ROLES, MODEL_SLOTS, type Backend, type ModelSlot, type RoleModelOverride, remapSettings } from "../core";
 import type { UserSettings } from "../core/settings.ts";
+import { endAllLiveSessions } from "../agent/claude-code/live-processes.ts";
 import { clampLevelFor } from "./model-catalog.ts";
 import { settingsStore } from "../store/settings.ts";
 import { providerKeyPresent } from "./keys.ts";
@@ -34,7 +35,15 @@ function clampEntry<T extends ModelSlot | RoleModelOverride>(entry: T): T {
  *  BackendUnavailableError, writing nothing, when `to` cannot run: the same
  *  availability the catalog reports as providers[].keyPresent (the CLI is
  *  opted in and installed / an Anthropic key is saved), so the switch never
- *  writes pins that every new session and background job would refuse. */
+ *  writes pins that every new session and background job would refuse.
+ *
+ *  A switch to the API also ends every live CLI process, in every lesson, and stales the ones
+ *  streaming right now (they end instead of idling when their turn finishes). Lessons that moved
+ *  have no use for them, and an open question's answer now runs on the API. A lesson with its own
+ *  CLI model pin stays on the CLI and replays once on its next turn, which costs less than tracking
+ *  which lesson resolves to which backend. A process waiting on tool results loses its wait and
+ *  its continuation replays, the trade saveChatSettings already makes; a turn still streaming
+ *  finishes normally. */
 export function switchBackend(to: Backend): { unmapped: string[] } {
 	if (!providerKeyPresent(to)) throw new BackendUnavailableError(to);
 	const before: UserSettings = settingsStore.readSettings() ?? { version: 1 };
@@ -54,5 +63,6 @@ export function switchBackend(to: Backend): { unmapped: string[] } {
 		}
 	}
 	settingsStore.writeSettings(record);
+	if (to === "anthropic") endAllLiveSessions();
 	return { unmapped };
 }

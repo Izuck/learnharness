@@ -27,6 +27,7 @@ import {
 	addIdleProcess,
 	addLiveProcess,
 	MAX_IDLE_PROCESSES,
+	endAllLiveSessions,
 	endLiveSession,
 	idleTurnTimeoutMs,
 	killAllLiveProcesses,
@@ -450,4 +451,161 @@ test("a process whose CLI compacted its own conversation is not kept: the next m
 	await waitForExit(spawns[0]!.child);
 	assert.equal(textOf(await runTurn(stream, [HI, first, NEXT])), "fresh");
 	assert.equal(spawns.length, 2);
+});
+
+// ─── a batch the bridge admits one call at a time ────────────────────────────
+
+/** One message that carries two tool calls, as the CLI streams a batch. */
+function batchMessage(first: ToolUse, second: ToolUse): string[] {
+	const block = (index: number, toolUse: ToolUse) => [
+		streamEvent({ type: "content_block_start", index, content_block: { type: "tool_use", id: toolUse.id, name: `mcp__learnharness__${toolUse.name}`, input: {} } }),
+		streamEvent({ type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: JSON.stringify(toolUse.arguments) } }),
+		streamEvent({ type: "content_block_stop", index }),
+	];
+	return [
+		streamEvent({ type: "message_start", message: { usage: {} } }),
+		...block(0, first),
+		...block(1, second),
+		streamEvent({ type: "message_delta", delta: { stop_reason: "tool_use" }, usage: {} }),
+		streamEvent({ type: "message_stop" }),
+	];
+}
+
+type Timed = { event: AssistantMessageEvent; at: number; content: AssistantMessage["content"] };
+
+async function collectTimed(stream: AsyncIterable<AssistantMessageEvent>): Promise<Timed[]> {
+	const events: Timed[] = [];
+	for await (const event of stream) {
+		const message = "partial" in event ? event.partial : "message" in event ? event.message : event.error;
+		events.push({ event, at: Date.now(), content: structuredClone(message.content) });
+	}
+	return events;
+}
+
+const callIds = (content: AssistantMessage["content"]) => content.flatMap((block) => (block.type === "toolCall" ? [block.id] : []));
+
+test("a call the bridge admits later stays on screen from the start of the next message, not from its admission", async (t) => {
+	// send_to_user + a question reach the bridge one call at a time (the CLI runs MCP tools serially):
+	// message 1 admits the first and drops the second's preview, and the second returns with message 2.
+	// Between those, the card used to be absent for the whole CLI round trip (here: the 400ms sleep).
+	const first: ToolUse = { id: "toolu_batch_first", name: "read", arguments: { path: "first" } };
+	const second: ToolUse = { id: "toolu_batch_second", name: "read", arguments: { path: "second" } };
+	const { runClaude, spawns } = createFakeRun(t, [[
+		...batchMessage(first, second),
+		JSON.stringify({ fake: "call", ...first }),
+		JSON.stringify({ fake: "sleep", ms: 400 }),
+		JSON.stringify({ fake: "call", ...second }),
+		JSON.stringify({ fake: "reply" }),
+	]]);
+	const stream = createClaudeCodeStreamFunction(runClaude);
+	const context = (messages: Message[]) => normalizeContext({ systemPrompt: "You are a tutor.", messages, tools: [READ_TOOL] });
+
+	const one = await collectTimed(stream(getModel(), context([HI]), { sessionId: SESSION_ID }));
+	const message1 = one.at(-1)!.event;
+	assert.ok(message1.type === "done");
+	assert.deepEqual(callIds(message1.message.content), [first.id], "only the admitted call ships in message 1");
+	assert.ok(one.some(({ content }) => callIds(content).includes(second.id)), "the second call did preview in message 1");
+
+	const two = await collectTimed(stream(getModel(), context([HI, message1.message, toToolResult(first, "first")]), { sessionId: SESSION_ID }));
+	const start = two.find(({ event }) => event.type === "toolcall_start");
+	const end = two.find(({ event }) => event.type === "toolcall_end");
+	assert.ok(start && end, "message 2 previews and then admits the second call");
+	assert.deepEqual(callIds(start.content), [second.id]);
+	assert.deepEqual(start.content[0], { type: "toolCall", id: second.id, name: "read", arguments: { path: "second" } }, "the preview carries the arguments already read");
+	assert.ok(end.at - start.at >= 250, `the preview was up ${end.at - start.at}ms before the MCP call admitted it`);
+	assert.equal(two.filter(({ event }) => event.type === "toolcall_start").length, 1, "one card, not a second one at admission");
+	const message2 = two.at(-1)!.event;
+	assert.ok(message2.type === "done" && message2.message.stopReason === "toolUse");
+	assert.deepEqual(callIds(message2.message.content), [second.id]);
+	assert.equal(spawns.length, 1);
+});
+
+test("a carried preview the CLI never calls fails the turn with the call withdrawn, so it never executes", async (t) => {
+	const first: ToolUse = { id: "toolu_moved_first", name: "read", arguments: { path: "first" } };
+	const second: ToolUse = { id: "toolu_moved_second", name: "read", arguments: { path: "second" } };
+	const { runClaude } = createFakeRun(t, [[
+		...batchMessage(first, second),
+		JSON.stringify({ fake: "call", ...first }),
+		// The CLI answers instead of calling the second tool.
+		JSON.stringify({ fake: "reply" }),
+	]]);
+	const stream = createClaudeCodeStreamFunction(runClaude);
+	const context = (messages: Message[]) => normalizeContext({ systemPrompt: "You are a tutor.", messages, tools: [READ_TOOL] });
+	const one = await collectTimed(stream(getModel(), context([HI]), { sessionId: SESSION_ID }));
+	const message1 = one.at(-1)!.event;
+	assert.ok(message1.type === "done");
+
+	const two = await collectTimed(stream(getModel(), context([HI, message1.message, toToolResult(first, "first")]), { sessionId: SESSION_ID }));
+	assert.ok(two.some(({ content }) => callIds(content).includes(second.id)), "the carried preview showed");
+	assert.equal(two.some(({ event }) => event.type === "toolcall_end"), false, "nothing was admitted");
+	const last = two.at(-1)!.event;
+	assert.ok(last.type === "error", `turn ended with ${last.type}`);
+	assert.match(last.error.errorMessage ?? "", /moved on without admitting/);
+	assert.deepEqual(callIds(last.error.content), [], "the final message carries no call pi could execute");
+});
+
+// ─── lessons moved off the CLI while a turn is streaming ─────────────────────
+
+const SLEEP_300 = JSON.stringify({ fake: "sleep", ms: 300 });
+
+test("a turn streaming when lessons move off the CLI ends its process instead of keeping it idle", async (t) => {
+	const lines = textMessage("one");
+	const { runClaude, spawns } = createFakeRun(t, [[...lines.slice(0, 3), SLEEP_300, ...lines.slice(3), WAIT_FOR_USER, ...textMessage("two")]]);
+	const stream = createClaudeCodeStreamFunction(runClaude);
+	const first = runTurn(stream, [HI]);
+	await sleep(120);
+	endAllLiveSessions(); // switchBackend to the API: nothing was registered yet to kill
+	assert.equal(textOf(await first), "one", "the turn itself finishes normally");
+	await waitForExit(spawns[0]!.child);
+});
+
+test("a turn that admits tool calls after lessons moved off the CLI is not kept waiting for results", async (t) => {
+	const readA: ToolUse = { id: "toolu_stale_a", name: "read", arguments: { path: "a" } };
+	const { runClaude, spawns } = createFakeRun(t, [[...toolUseMessage(readA), SLEEP_300, JSON.stringify({ fake: "call", ...readA }), JSON.stringify({ fake: "reply" })]]);
+	const stream = createClaudeCodeStreamFunction(runClaude);
+	const first = runTurn(stream, [HI]);
+	await sleep(120);
+	endAllLiveSessions();
+	const message = await first;
+	assert.deepEqual(message.content.filter((block) => block.type === "toolCall").map((call) => call.id), [readA.id], "the admitted call still ships");
+	await waitForExit(spawns[0]!.child);
+});
+
+test("a turn that starts after the move is kept as usual", async (t) => {
+	const { runClaude, spawns } = createFakeRun(t, [[...textMessage("one"), WAIT_FOR_USER, ...textMessage("two")]]);
+	endAllLiveSessions();
+	const stream = createClaudeCodeStreamFunction(runClaude);
+	await runTurn(stream, [HI]);
+	assert.ok(isAlive(spawns[0]!.child));
+});
+
+// ─── a carried preview that never gets admitted ──────────────────────────────
+
+function carriedScenario(first: ToolUse, second: ToolUse, then: string[]): string[] {
+	return [...batchMessage(first, second), JSON.stringify({ fake: "call", ...first }), ...then];
+}
+
+for (const how of ["abort", "process death"] as const) test(`${how} while a carried preview shows leaves no tool call in the message and emits no toolcall_end`, async (t) => {
+	const first: ToolUse = { id: `toolu_${how.slice(0, 3)}_first`, name: "read", arguments: { path: "first" } };
+	const second: ToolUse = { id: `toolu_${how.slice(0, 3)}_second`, name: "read", arguments: { path: "second" } };
+	const { runClaude } = createFakeRun(t, [carriedScenario(first, second, how === "abort" ? [HOLD] : [JSON.stringify({ fake: "sleep", ms: 200 }), JSON.stringify({ fake: "exit", code: 1, stderr: "" })])]);
+	const stream = createClaudeCodeStreamFunction(runClaude);
+	const context = (messages: Message[]) => normalizeContext({ systemPrompt: "You are a tutor.", messages, tools: [READ_TOOL] });
+	const one = await collectTimed(stream(getModel(), context([HI]), { sessionId: SESSION_ID }));
+	const message1 = one.at(-1)!.event;
+	assert.ok(message1.type === "done");
+
+	const controller = new AbortController();
+	const events: Timed[] = [];
+	for await (const event of stream(getModel(), context([HI, message1.message, toToolResult(first, "first")]), { sessionId: SESSION_ID, signal: controller.signal })) {
+		const message = "partial" in event ? event.partial : "message" in event ? event.message : event.error;
+		events.push({ event, at: Date.now(), content: structuredClone(message.content) });
+		if (how === "abort" && event.type === "toolcall_start") controller.abort();
+	}
+	assert.ok(events.some(({ content }) => callIds(content).includes(second.id)), "the carried preview showed");
+	assert.equal(events.some(({ event }) => event.type === "toolcall_end"), false, "nothing was admitted");
+	const last = events.at(-1)!.event;
+	assert.ok(last.type === "error", `turn ended with ${last.type}`);
+	assert.equal(last.reason, how === "abort" ? "aborted" : "error");
+	assert.deepEqual(callIds(last.error.content), []);
 });

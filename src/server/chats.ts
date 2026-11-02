@@ -143,6 +143,7 @@ export async function deleteChatSession(chatId: string, mode: ChatDeleteMode): P
 	if (stores.chatStore.deleteChat(chatId)) {
 		discardChatDeliveries(chatId);
 		clearTurnFailure(chatId);
+		endLiveSession(chatId); // The lesson is gone: its kept CLI process would only wait out its timeout.
 	}
 	return { ok: true, mode, stats, jobsRemoved, graphRevision: graphRevision() };
 }
