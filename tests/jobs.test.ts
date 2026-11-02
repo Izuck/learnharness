@@ -287,6 +287,25 @@ describe("job store", () => {
 		assert.equal(jobStore.findJobByToolCallId("chat_storetest", "call-missing"), null);
 	});
 
+	it("a malformed job file never blanks the listing for other chats", () => {
+		const good = jobStore.createJob({ kind: "research", chatId: "chat_malformed_ok", toolCallId: "call-ok" });
+		trackJob(good.id);
+		const noStamp = jobStore.createJob({ kind: "research", chatId: "chat_malformed_ok", toolCallId: "call-nostamp" });
+		trackJob(noStamp.id);
+		// A record missing updatedAt (the sort used to throw -> [] for everyone)…
+		const { updatedAt: _dropped, ...stampless } = jobStore.getJob(noStamp.id)!;
+		fs.writeFileSync(path.join(JOBS_DIR, `${noStamp.id}.json`), JSON.stringify(stampless));
+		// …a non-object record, and one without a chatId.
+		fs.writeFileSync(path.join(JOBS_DIR, "job_malformed_scalar.json"), "5");
+		fs.writeFileSync(path.join(JOBS_DIR, "job_malformed_nochat.json"), JSON.stringify({ id: "job_malformed_nochat", status: "running" }));
+		trackJob("job_malformed_scalar");
+		trackJob("job_malformed_nochat");
+		const ids = jobStore.listJobs("chat_malformed_ok").map((j) => j.id);
+		assert.ok(ids.includes(good.id) && ids.includes(noStamp.id), "good chats' jobs are still listed");
+		assert.equal(jobStore.findJobByToolCallId("chat_malformed_ok", "call-ok")?.id, good.id);
+		assert.ok(jobStore.listAllJobs().some((j) => j.id === good.id));
+	});
+
 	// ── push-architecture S4 (2026-10-02): every WRITE announces on the
 	// events channel (notify-after-write); reads stay silent ──
 	it("every mutation emits jobs-changed {chatId}; reads emit nothing", () => {
@@ -1783,21 +1802,24 @@ describe("stale-job recovery sweep (liveness-gated)", () => {
 		fs.unlinkSync(path.join(PATHS.chats, `${ghost.chatId}.json`));
 
 		const store = jobStore as unknown as Record<string, (...args: unknown[]) => unknown>;
-		const calls = { listJobs: 0, listAllJobs: 0, listChats: 0 };
+		const calls = { listJobs: 0, listAllJobs: 0, listChats: 0, getChat: 0 };
 		const chats = chatStore as unknown as Record<string, (...args: unknown[]) => unknown>;
 		const realListJobs = store.listJobs!;
-		const realListAllJobs = store.listAllJobs;
+		const realListAllJobs = store.listAllJobs!;
+		const realGetChat = chats.getChat!;
 		const realListChats = chats.listChats!;
 		store.listJobs = (...args) => {
 			calls.listJobs++;
 			return realListJobs.apply(jobStore, args);
 		};
-		if (realListAllJobs) {
-			store.listAllJobs = (...args) => {
-				calls.listAllJobs++;
-				return realListAllJobs.apply(jobStore, args);
-			};
-		}
+		store.listAllJobs = (...args) => {
+			calls.listAllJobs++;
+			return realListAllJobs.apply(jobStore, args);
+		};
+		chats.getChat = (...args) => {
+			calls.getChat++;
+			return realGetChat.apply(chatStore, args);
+		};
 		chats.listChats = (...args) => {
 			calls.listChats++;
 			return realListChats.apply(chatStore, args);
@@ -1806,12 +1828,14 @@ describe("stale-job recovery sweep (liveness-gated)", () => {
 		setJobRespawn((id) => {
 			respawnedIds.push(id);
 		});
+		const distinctChats = new Set(realListAllJobs.call(jobStore).map((j) => j.chatId)).size;
 		try {
 			resetSweepThrottle();
 			recoverStaleJobs();
 		} finally {
 			store.listJobs = realListJobs;
-			if (realListAllJobs) store.listAllJobs = realListAllJobs;
+			store.listAllJobs = realListAllJobs;
+			chats.getChat = realGetChat;
 			chats.listChats = realListChats;
 		}
 		for (const o of orphans) {
@@ -1823,6 +1847,39 @@ describe("stale-job recovery sweep (liveness-gated)", () => {
 		assert.equal(calls.listAllJobs, 1, "the jobs dir is listed once per sweep");
 		assert.equal(calls.listJobs, 0, "never once per chat (the chats x jobs file-read blowup)");
 		assert.equal(calls.listChats, 0, "the sweep resolves chats directly, not by parsing every chat file");
+		assert.equal(calls.getChat, distinctChats, "exactly one direct chat lookup per distinct chat holding a job");
+	});
+
+	it("a corrupt chat (no messages) and a throwing chat never starve the sweep — healthy chats still recover", () => {
+		// Corrupt: a chat file with NO messages array (listChats hid these;
+		// getChat still returns them) holding a job that would be processed.
+		const corruptId = "chat_corrupt_sweep";
+		fs.mkdirSync(PATHS.chats, { recursive: true });
+		fs.writeFileSync(path.join(PATHS.chats, `${corruptId}.json`), JSON.stringify({ id: corruptId, title: "corrupt", updatedAt: "2026-01-01T00:00:00.000Z" }));
+		trackChat(corruptId);
+		const corruptJob = jobStore.createJob({ kind: "research", chatId: corruptId, toolCallId: "call-corrupt" });
+		trackJob(corruptJob.id);
+		// Throwing: respawn blows up for this orphan; it is the NEWEST job, so
+		// its chat is visited first — the healthy chat must still be reached.
+		const bad = orphanJob();
+		const good = orphanJob();
+		jobStore.updateJob(bad.jobId, { updatedAt: new Date(Date.now() + 60_000).toISOString() });
+		const respawnedIds: string[] = [];
+		setJobRespawn((id) => {
+			if (id === bad.jobId) throw new Error("respawn exploded");
+			respawnedIds.push(id);
+		});
+		const realError = console.error;
+		console.error = () => {};
+		try {
+			resetSweepThrottle();
+			recoverStaleJobs();
+		} finally {
+			console.error = realError;
+		}
+		for (const j of [corruptJob.id, bad.jobId, good.jobId]) jobStore.updateJob(j, { status: "done", activity: "settled (test)" });
+		assert.ok(respawnedIds.includes(good.jobId), "the healthy chat's orphan is recovered despite the bad chats");
+		assert.ok(!respawnedIds.includes(corruptJob.id), "a chat without messages is invisible to the sweep (as under listChats)");
 	});
 });
 

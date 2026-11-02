@@ -78,8 +78,11 @@ function listAllJobs(): JobRecord[] {
 			.readdirSync(JOBS_DIR)
 			.filter((f) => f.endsWith(".json"))
 			.map((f) => getJob(f.slice(0, -5)))
-			.filter((j): j is JobRecord => j !== null)
-			.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+			// One malformed record (not an object, no string chatId) must not
+			// blank the listing for every chat — skip it; tolerate a missing
+			// updatedAt in the sort for the same reason.
+			.filter((j): j is JobRecord => typeof j === "object" && j !== null && typeof j.chatId === "string")
+			.sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
 	} catch {
 		return [];
 	}

@@ -747,20 +747,28 @@ export function recoverStaleJobs(): void {
 			else byChat.set(job.chatId, [job]);
 		}
 		for (const [chatId, jobs] of byChat) {
-			if (!stores.chatStore.getChat(chatId)) continue; // chat gone: its jobs are not ours to recover
-			for (const job of jobs) {
-				if (isJobLive(job.id)) continue; // never re-run beside live computation
-				if (isTurnRunning(job.chatId)) continue;
-				const recovered = normalizeLegacyResult(job);
-				if (recovered.delivery?.status === "pending") {
-					restorePendingDeliveries(job.chatId);
-					void pump(job.chatId);
-				} else if (job.status === "running" && !job.result) {
-					// The sub-agent loop itself died with the process: re-spawn.
-					if (!s.respawn) continue;
-					stores.jobStore.updateJob(job.id, { activity: "recovering: re-running" });
-					s.respawn(job.id);
+			// Chat gone — or unusable (listChats, which the old sweep walked,
+			// drops records without a messages array): its jobs are not ours.
+			const chat = stores.chatStore.getChat(chatId);
+			if (!chat || !Array.isArray(chat.messages)) continue;
+			// One bad chat must never starve the rest of the sweep.
+			try {
+				for (const job of jobs) {
+					if (isJobLive(job.id)) continue; // never re-run beside live computation
+					if (isTurnRunning(job.chatId)) continue;
+					const recovered = normalizeLegacyResult(job);
+					if (recovered.delivery?.status === "pending") {
+						restorePendingDeliveries(job.chatId);
+						void pump(job.chatId);
+					} else if (job.status === "running" && !job.result) {
+						// The sub-agent loop itself died with the process: re-spawn.
+						if (!s.respawn) continue;
+						stores.jobStore.updateJob(job.id, { activity: "recovering: re-running" });
+						s.respawn(job.id);
+					}
 				}
+			} catch (err) {
+				console.error(`[jobs] stale-job recovery failed for chat ${chatId}:`, err);
 			}
 		}
 	} catch (err) {
