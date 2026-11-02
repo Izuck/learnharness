@@ -248,10 +248,10 @@ export class ForestCanvasRenderer {
 		if (!this.bbox) return;
 		const w = this.canvas.clientWidth;
 		const h = this.canvas.clientHeight;
-		if (w < 10 || h < 10) return;
+		if (!(w >= 10 && h >= 10)) return; // also rejects NaN
 		const t = fitTransform(this.bbox, w, h, FIT_PADDING);
 		const k = Math.min(t.k, FIT_K_CAP);
-		this.kFit = t.k;
+		this.kFit = k; // the CAPPED fit: the zoom floor must sit below the camera's starting k
 		this.updateExtent();
 		this.hasFit = true;
 		this.zoomTarget = null;
@@ -307,8 +307,8 @@ export class ForestCanvasRenderer {
 		if (!this.bbox) return;
 		const w = this.canvas.clientWidth;
 		const h = this.canvas.clientHeight;
-		if (w < 10 || h < 10) return;
-		this.kFit = fitTransform(this.bbox, w, h, FIT_PADDING).k;
+		if (!(w >= 10 && h >= 10)) return; // also rejects NaN
+		this.kFit = Math.min(fitTransform(this.bbox, w, h, FIT_PADDING).k, FIT_K_CAP);
 		this.updateExtent();
 	}
 
@@ -373,14 +373,17 @@ export class ForestCanvasRenderer {
 		if (!this.model) return null;
 		const { x: tx, y: ty, k } = this.transform;
 		const maxDist = CLEARING_R * k + 10;
-		const vis = visibleTopics(this.model.topics, this.transform, this.viewW, this.viewH, maxDist);
-		const hit = pickNearest(
-			vis.map((t) => ({ id: t.id, x: t.x * k + tx, y: t.y * k + ty })),
-			px,
-			py,
-			maxDist,
-		);
-		return hit?.id ?? null;
+		// One allocation-free pass: the nearest topic centre within maxDist.
+		let best: string | null = null;
+		let bestD = maxDist * maxDist;
+		for (const t of this.model.topics) {
+			const d = (t.x * k + tx - px) ** 2 + (t.y * k + ty - py) ** 2;
+			if (d < bestD) {
+				bestD = d;
+				best = t.id;
+			}
+		}
+		return best;
 	}
 
 	private pickIdeaAt(px: number, py: number): string | null {

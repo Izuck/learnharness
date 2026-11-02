@@ -11,11 +11,17 @@ import { propositionSessionHref } from "../src/core/index.ts";
 const dom = parseHTML("<html><body></body></html>");
 // A canvas 2D context that accepts everything: property writes are kept,
 // method calls and gradient objects are inert.
-const noopContext = (): CanvasRenderingContext2D => {
+let fills = 0; // fillRect calls: proof the renderer's draw() ran
+let contextAvailable = true;
+const noopContext = (): CanvasRenderingContext2D | null => {
+	if (!contextAvailable) return null;
 	const store: Record<string | symbol, unknown> = {};
-	const callable = () => new Proxy(function () {}, { get: (_t, prop) => (prop === "addColorStop" ? () => {} : undefined), apply: () => undefined });
+	const callable = (prop: string | symbol) => new Proxy(function () {}, {
+		get: (_t, p) => (p === "addColorStop" ? () => {} : undefined),
+		apply: () => { if (prop === "fillRect") fills++; return undefined; },
+	});
 	return new Proxy(store, {
-		get: (target, prop) => (prop in target ? target[prop] : callable()),
+		get: (target, prop) => (prop in target ? target[prop] : callable(prop)),
 		set: (target, prop, value) => { target[prop] = value; return true; },
 	}) as unknown as CanvasRenderingContext2D;
 };
@@ -32,6 +38,8 @@ class TestPath2D {
 }
 let fetched: string[] = [];
 let snapshot: ForestSnapshot | null = null;
+/** ok: resolve the snapshot; http500 / network: fail; pending: never settle. */
+let fetchMode: "ok" | "http500" | "network" | "pending" = "ok";
 Object.assign(globalThis, {
 	window: dom.window, document: dom.document, HTMLElement: dom.window.HTMLElement,
 	IS_REACT_ACT_ENVIRONMENT: true,
@@ -39,11 +47,15 @@ Object.assign(globalThis, {
 	IntersectionObserver: TestIntersectionObserver, // next/link prefetch
 	self: globalThis,
 	Path2D: TestPath2D,
-	requestAnimationFrame: () => 1,
+	// Runs the frame callback (after frameId is assigned) so draw() really executes.
+	requestAnimationFrame: (cb: (t: number) => void) => { queueMicrotask(() => cb(0)); return 1; },
 	cancelAnimationFrame: () => {},
 	getComputedStyle: () => ({ getPropertyValue: () => "", fontFamily: "" }),
 	fetch: async (url: string) => {
 		fetched.push(String(url));
+		if (fetchMode === "pending") return new Promise(() => {});
+		if (fetchMode === "network") throw new Error("offline");
+		if (fetchMode === "http500") return { ok: false, status: 500, json: async () => ({}) };
 		return { ok: true, json: async () => snapshot };
 	},
 });
@@ -74,7 +86,7 @@ const snap = (m: ForestModel | null, propositions: GraphNode[] = [node("n1", "Id
 
 let host: HTMLElement | null = null;
 let unmount: (() => Promise<void>) | null = null;
-async function mount(s: ForestSnapshot): Promise<HTMLElement> {
+async function mount(s: ForestSnapshot | null): Promise<HTMLElement> {
 	snapshot = s;
 	fetched = [];
 	host = document.createElement("div");
@@ -90,6 +102,8 @@ async function mount(s: ForestSnapshot): Promise<HTMLElement> {
 	return host;
 }
 afterEach(async () => {
+	fetchMode = "ok";
+	contextAvailable = true;
 	await unmount?.();
 	host?.remove();
 	host = null;
@@ -115,6 +129,58 @@ describe("ForestView empty states", () => {
 	});
 });
 
+describe("ForestView load and error states", () => {
+	const button = (el: HTMLElement, label: string) =>
+		Array.from(el.querySelectorAll("button")).find((b) => (b.textContent ?? "").trim() === label);
+
+	it("shows Loading while the first fetch is pending", async () => {
+		fetchMode = "pending";
+		const el = await mount(snap(model()));
+		assert.ok((el.textContent ?? "").includes("Loading"), el.textContent ?? "");
+		assert.ok(!(el.textContent ?? "").includes("Couldn't load"));
+	});
+
+	for (const mode of ["http500", "network"] as const) {
+		it(`shows an error with Retry when the fetch fails (${mode}), and Retry recovers`, async () => {
+			fetchMode = mode;
+			const errors = console.error;
+			console.error = () => {};
+			try {
+				const el = await mount(snap(model({ coverage: { mapped: 7, total: 10000 } })));
+				assert.ok((el.textContent ?? "").includes("Couldn't load the forest"), el.textContent ?? "");
+				assert.ok(!(el.textContent ?? "").includes("Loading"));
+				const retry = button(el, "Retry");
+				assert.ok(retry, "Retry button");
+				fetchMode = "ok";
+				await act(async () => { retry.dispatchEvent(new dom.window.Event("click", { bubbles: true })); });
+				for (let i = 0; i < 4; i++) await act(async () => { await Promise.resolve(); });
+				assert.equal(fetched.length, 2, "Retry fetched again");
+				assert.ok((el.textContent ?? "").includes("Mapped 0.07% of undergrad STEM"), el.textContent ?? "");
+				assert.ok(!(el.textContent ?? "").includes("Couldn't load"));
+			} finally {
+				console.error = errors;
+			}
+		});
+	}
+
+	it("keeps the previous forest when a later refetch fails", async () => {
+		const el = await mount(snap(model({ coverage: { mapped: 7, total: 10000 } })));
+		fetchMode = "network";
+		const errors = console.error;
+		console.error = () => {};
+		try {
+			await act(async () => { dom.window.dispatchEvent(new dom.window.Event("lh:graph-revision")); });
+			for (let i = 0; i < 4; i++) await act(async () => { await Promise.resolve(); });
+		} finally {
+			console.error = errors;
+		}
+		assert.equal(fetched.length, 2);
+		const text = el.textContent ?? "";
+		assert.ok(text.includes("Mapped 0.07% of undergrad STEM"), text);
+		assert.ok(!text.includes("Couldn't load the forest"), text);
+	});
+});
+
 describe("ForestView overlays", () => {
 	it("renders the coverage line", async () => {
 		const el = await mount(snap(model({ coverage: { mapped: 7, total: 10000 } })));
@@ -123,9 +189,23 @@ describe("ForestView overlays", () => {
 	});
 
 	it("draws a forest with no lit topics at a 0x0 canvas without throwing", async () => {
+		fills = 0;
 		const el = await mount(snap(model({ topics: [topic("t1"), topic("t2")], coverage: { mapped: 0, total: 2 } })));
 		assert.ok(el.querySelector("canvas"));
+		assert.ok(fills > 0, "draw() ran against the 0x0 canvas");
 		assert.ok((el.textContent ?? "").includes("Mapped 0% of undergrad STEM"), el.textContent ?? "");
+	});
+
+	it("says so when the canvas context is unavailable instead of crashing", async () => {
+		contextAvailable = false;
+		const errors = console.error;
+		console.error = () => {};
+		try {
+			const el = await mount(snap(model()));
+			assert.ok((el.textContent ?? "").includes("Canvas unavailable"), el.textContent ?? "");
+		} finally {
+			console.error = errors;
+		}
 	});
 
 	it("lists uncharted ideas", async () => {

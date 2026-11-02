@@ -15,7 +15,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { formatCoverage, forestLevel, type ForestCamera, type ForestSnapshot, type GraphNode } from "@/src/core";
 import { useServerEvent } from "@/components/server-events";
-import { ForestCanvasRenderer, DEFAULT_FOREST_COLORS, type ForestColors } from "./forest-canvas.ts";
+import { ForestCanvasRenderer, DEFAULT_FOREST_COLORS, type ForestCallbacks, type ForestColors } from "./forest-canvas.ts";
 import { ForestIdeaCard } from "./forest-idea-card.tsx";
 
 const CAMERA_STORAGE_KEY = "lh.forest.camera.v1";
@@ -71,6 +71,14 @@ function Step({ children }: { children: string }) {
 	return <code className="block rounded-md bg-muted px-3 py-1.5 font-mono text-sm text-foreground">{children}</code>;
 }
 
+function Notice({ children }: { children: React.ReactNode }) {
+	return (
+		<div className="absolute inset-0 flex items-center justify-center p-6">
+			<div className="flex flex-col items-center gap-3 text-sm text-muted-foreground">{children}</div>
+		</div>
+	);
+}
+
 function EmptyState({ needsGenerate }: { needsGenerate: boolean }) {
 	return (
 		<div className="absolute inset-0 flex items-center justify-center p-6">
@@ -101,6 +109,10 @@ export function ForestView() {
 	const [snapshot, setSnapshot] = useState<ForestSnapshot | null>(null);
 	const [unchartedOpen, setUnchartedOpen] = useState(false);
 	const [selected, setSelected] = useState<Selected | null>(null);
+	/** The last fetch failed (the previous snapshot, if any, stays on screen). */
+	const [failed, setFailed] = useState(false);
+	/** The 2D context was unavailable when the renderer was built. */
+	const [canvasBroken, setCanvasBroken] = useState(false);
 	const containerRef = useRef<HTMLDivElement>(null);
 	const canvasRef = useRef<HTMLCanvasElement>(null);
 	const rendererRef = useRef<ForestCanvasRenderer | null>(null);
@@ -121,9 +133,14 @@ export function ForestView() {
 				return res.json() as Promise<ForestSnapshot>;
 			})
 			.then((next) => {
-				if (mine === requestRef.current) setSnapshot(next); // a newer request supersedes
+				if (mine !== requestRef.current) return; // a newer request supersedes
+				setSnapshot(next);
+				setFailed(false);
 			})
-			.catch((err) => console.error("[forest] fetch failed", err));
+			.catch((err) => {
+				console.error("[forest] fetch failed", err);
+				if (mine === requestRef.current) setFailed(true);
+			});
 	}, []);
 	useEffect(() => {
 		refresh();
@@ -170,33 +187,37 @@ export function ForestView() {
 				// Camera persistence is best-effort.
 			}
 		};
-		const renderer = new ForestCanvasRenderer(
-			canvas,
-			{
-				onTopicClick: (id) => {
-					// Fly in from the world and region levels; inside a clearing a
-					// click on the ground only dismisses the card.
-					if (forestLevel(cameraRef.current?.k ?? 0) !== "clearing") rendererRef.current?.flyToTopic(id);
-					else setSelected(null);
-				},
-				onIdeaClick: (nodeId, screen) => {
-					const node = snapshotRef.current?.graph.propositions.find((n) => n.id === nodeId);
-					if (node) setSelected({ node, anchor: screen });
-				},
-				onStageClick: () => setSelected(null),
-				onCameraMove: (cam) => {
-					cameraRef.current = cam;
-					setSelected(null); // a moving camera detaches the card from its idea
-					last = cam;
-					if (timer) clearTimeout(timer);
-					timer = setTimeout(() => {
-						timer = null;
-						write(cam);
-					}, 250);
-				},
+		const callbacks: ForestCallbacks = {
+			onTopicClick: (id) => {
+				// Fly in from the world and region levels; inside a clearing a
+				// click on the ground only dismisses the card.
+				if (forestLevel(cameraRef.current?.k ?? 0) !== "clearing") rendererRef.current?.flyToTopic(id);
+				else setSelected(null);
 			},
-			initial,
-		);
+			onIdeaClick: (nodeId, screen) => {
+				const node = snapshotRef.current?.graph.propositions.find((n) => n.id === nodeId);
+				if (node) setSelected({ node, anchor: screen });
+			},
+			onStageClick: () => setSelected(null),
+			onCameraMove: (cam) => {
+				cameraRef.current = cam;
+				setSelected(null); // a moving camera detaches the card from its idea
+				last = cam;
+				if (timer) clearTimeout(timer);
+				timer = setTimeout(() => {
+					timer = null;
+					write(cam);
+				}, 250);
+			},
+		};
+		let renderer: ForestCanvasRenderer;
+		try {
+			renderer = new ForestCanvasRenderer(canvas, callbacks, initial);
+		} catch (err) {
+			console.error("[forest] renderer unavailable", err);
+			setCanvasBroken(true);
+			return;
+		}
 		rendererRef.current = renderer;
 		return () => {
 			rendererRef.current = null;
@@ -257,8 +278,30 @@ export function ForestView() {
 			className="relative h-full w-full overflow-hidden"
 			style={{ background: "var(--lh-forest-bg)" }}
 		>
-			{hasForest && <canvas ref={canvasRef} className="absolute inset-0 size-full touch-none" />}
+			{hasForest && !canvasBroken && <canvas ref={canvasRef} className="absolute inset-0 size-full touch-none" />}
+			{hasForest && canvasBroken && <Notice>Canvas unavailable</Notice>}
 			{snapshot && !hasForest && <EmptyState needsGenerate={!model || model.unpositioned === 0} />}
+			{!snapshot && !failed && <Notice>Loading…</Notice>}
+			{!snapshot && failed && (
+				<Notice>
+					<div className="text-base font-medium text-foreground">Couldn&apos;t load the forest</div>
+					<button
+						type="button"
+						onClick={() => {
+							setFailed(false);
+							refresh();
+						}}
+						className="rounded-full border bg-card px-3 py-1.5 text-xs text-foreground transition-colors hover:bg-accent"
+					>
+						Retry
+					</button>
+				</Notice>
+			)}
+			{snapshot && failed && (
+				<div className="pointer-events-none absolute right-3 top-3 z-10 text-xs text-muted-foreground">
+					Couldn&apos;t refresh
+				</div>
+			)}
 
 			{hasForest && model && (
 				<div className="pointer-events-none absolute left-3 top-3 z-10 flex flex-col gap-0.5 text-xs text-muted-foreground">
