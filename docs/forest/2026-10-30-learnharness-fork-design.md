@@ -78,6 +78,7 @@ Isaac (an engineering student at Georgia Tech) wants to learn STEM properly befo
 - It's a one-time Node script that drives the Claude Code CLI with Opus, one degree at a time, from standard curricula (typical required and common elective courses of an ABET-accredited or equivalent BS).
 - It writes `data/world/topics.json` and a human-readable `data/world/WORLD.md`.
 - A topic shared by several degrees ("linear algebra", "Fourier analysis") appears once and lists all of them.
+- The same concept is often named slightly differently ("Bipolar Junction Transistor" / "Bipolar Junction Transistors", "Searching and Sorting Algorithms" / "Algorithms: Searching and Sorting"), which would stop it merging. `npm run world:dedupe` runs after generation and before layout. It finds candidate groups (exact normalised-name collisions, plus fuzzy pairs that share no course), has Sonnet judge each group (same concept at the same grain, or not), and stores every verdict in `build/merges.json` so a rerun never re-asks. It then rebuilds `topics.json` with the duplicates folded together (generation applies the same file), appends placement lines for nodes that sat on a merged-away topic, and writes a readable `build/merges.md`. It refuses to merge a topic that already has a layout position unless `--force` is passed. Rerun it whenever generation has added courses.
 - Expect very roughly 3,000–5,000 topics (an estimate). The script can resume, and it runs in batches small enough not to drain a day's plan usage in one go.
 
 **Layout.**

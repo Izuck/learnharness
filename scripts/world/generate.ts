@@ -4,7 +4,9 @@
  * batch is written to <build>/<degree>/<course-slug>.json as it lands, so a
  * rerun RESUMES (finished courses are not asked again). Finally every batch on
  * disk is merged into data/world/topics.json (positions empty — layout.ts
- * places them) through the Cartographer store, plus a WORLD.md report.
+ * places them) through the Cartographer store, plus a WORLD.md report. When
+ * the dedupe step has saved build/merges.json (npm run world:dedupe), its
+ * verdicts are applied in that merge too.
  *
  *   npm run world:generate            all degrees
  *   npm run world:generate -- math    only the named degree ids
@@ -21,9 +23,10 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { PATHS, WORLD_FILES } from "../../config.ts";
 import type { CourseTopicsBatch, WorldDegree } from "../../src/core/contracts/world.ts";
-import { carryPositions, isCourseTopicsBatch, mergeDegreeTopics, topicSlug } from "../../src/core/world.ts";
+import { isCourseTopicsBatch, topicSlug } from "../../src/core/world.ts";
 import { WORLD_DEGREES } from "../../src/core/world-layout.ts";
 import { worldStore } from "../../src/store/world.ts";
+import { buildWorld, readJson } from "./build-world.ts";
 import { runClaudeJson } from "./claude-cli.ts";
 
 const PROMPTS = path.join(path.dirname(fileURLToPath(import.meta.url)), "prompts");
@@ -65,14 +68,6 @@ const MAX_CONSECUTIVE_FAILURES = 3;
 /** A usable batch: right shape AND at least one topic (an empty list would be
  *  cached as "done" and the course skipped forever). */
 const isUsableBatch = (v: unknown): v is CourseTopicsBatch => isCourseTopicsBatch(v) && v.topics.length > 0;
-
-const readJson = (file: string): unknown => {
-	try {
-		return JSON.parse(fs.readFileSync(file, "utf-8"));
-	} catch {
-		return null;
-	}
-};
 
 /** A usable course list: at least one non-blank name (an empty list would be
  *  cached and the degree skipped forever, so a cached empty list reads as absent). */
@@ -195,47 +190,6 @@ export async function generateWorld(o: {
 	return batches;
 }
 
-/** Every valid batch on disk under buildDir, in a stable order. */
-function readAllBatches(buildDir: string): CourseTopicsBatch[] {
-	const out: CourseTopicsBatch[] = [];
-	if (!fs.existsSync(buildDir)) return out;
-	for (const d of fs.readdirSync(buildDir).sort()) {
-		const dir = path.join(buildDir, d);
-		if (!fs.statSync(dir).isDirectory()) continue;
-		for (const f of fs.readdirSync(dir).sort()) {
-			if (f.startsWith("_") || !f.endsWith(".json")) continue;
-			const v = readJson(path.join(dir, f));
-			if (isCourseTopicsBatch(v)) out.push(v);
-		}
-	}
-	return out;
-}
-
-function renderReport(
-	degrees: WorldDegree[],
-	batches: CourseTopicsBatch[],
-	topicCount: number,
-	unresolved: Array<{ topic: string; prereq: string }>,
-): string {
-	const lines: string[] = [
-		"# World",
-		"",
-		`${degrees.length} degrees, ${topicCount} topics (merged across degrees), ${batches.length} courses.`,
-		"",
-	];
-	for (const d of degrees) {
-		const mine = batches.filter((b) => b.degree === d.id);
-		const total = mine.reduce((n, b) => n + b.topics.length, 0);
-		lines.push(`## ${d.name} (${d.id}) - ${mine.length} courses, ${total} topics`, "");
-		for (const b of mine) lines.push(`- ${b.course}: ${b.topics.length}`);
-		lines.push("");
-	}
-	lines.push(`## Unresolved prereqs (${unresolved.length})`, "");
-	lines.push("Prereq names that matched no generated topic; dropped from the world.", "");
-	for (const u of unresolved) lines.push(`- ${u.topic}: "${u.prereq}"`);
-	return `${lines.join("\n")}\n`;
-}
-
 async function main(): Promise<void> {
 	console.log(`Data folder: ${PATHS.data}`);
 	const wanted = process.argv.slice(2);
@@ -245,26 +199,15 @@ async function main(): Promise<void> {
 
 	await generateWorld({ degrees, buildDir: WORLD_FILES.build, ask: runClaudeJson, log });
 
-	// The world is every batch on disk, so a partial run still yields a
-	// consistent topics.json of what has been generated so far.
-	const batches = readAllBatches(WORLD_FILES.build);
-	const merged = mergeDegreeTopics(batches);
-	const { unresolvedPrereqs } = merged;
-	// A rerun must not wipe positions a previous layout saved.
-	const prev = worldStore.readWorld();
-	const topics = carryPositions(merged.topics, prev);
-	const present = WORLD_DEGREES.filter((d) => batches.some((b) => b.degree === d.id));
-	worldStore.writeWorld({
-		version: 1,
-		generatedAt: new Date().toISOString(),
-		degrees: [...present],
-		topics,
-		// Stored anchors go with the saved positions: dropping them would let the
-		// next layout re-derive anchors the pinned topics no longer match.
-		...(prev?.anchors ? { anchors: prev.anchors } : {}),
+	// The world is every batch on disk (with build/merges.json applied when the
+	// dedupe step has run), so a partial run still yields a consistent topics.json.
+	const plan = buildWorld({
+		buildDir: WORLD_FILES.build,
+		mergesFile: WORLD_FILES.merges,
+		reportFile: WORLD_FILES.report,
+		store: worldStore,
 	});
-	fs.writeFileSync(WORLD_FILES.report, renderReport([...present], batches, topics.length, unresolvedPrereqs), "utf-8");
-	log(`Wrote ${topics.length} topics to ${WORLD_FILES.topics} and ${WORLD_FILES.report}`);
+	log(`Wrote ${plan.topics.length} topics to ${WORLD_FILES.topics} and ${WORLD_FILES.report}`);
 }
 
 const entry = process.argv[1];

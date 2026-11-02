@@ -67,6 +67,7 @@ export const WORLD_FILES = {
 	topics: path.join(DATA_ROOT, "world", "topics.json"),
 	report: path.join(DATA_ROOT, "world", "WORLD.md"),
 	build: path.join(DATA_ROOT, "world", "build"), // <degree>/<course-slug>.json
+	merges: path.join(DATA_ROOT, "world", "build", "merges.json"), // dedupe verdicts (scripts/world/dedupe.ts)
 	placements: path.join(DATA_ROOT, "world", "placements.jsonl"),
 } as const;
 

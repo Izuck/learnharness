@@ -66,3 +66,15 @@ export interface Placement {
 	topicId: string | null;
 	placedAt: string;
 }
+
+/** The dedupe step's verdicts (build/merges.json): which near-duplicate topic
+ *  groups are the same concept. Applied when the world is built, so the
+ *  per-course batches on disk are never edited. */
+export interface TopicMerges {
+	version: 1;
+	/** Every judged candidate group, keyed by its member ids sorted and joined with "|", so a rerun never re-asks. */
+	decisions: Record<
+		string,
+		{ same: boolean; canonical?: string /* topic name */; reason: string; decidedAt: string }
+	>;
+}
