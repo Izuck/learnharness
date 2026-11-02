@@ -12,6 +12,7 @@
  *   {"fake":"wait-for-message"}              pause until the test releases the child over IPC
  *   {"fake":"ignore-term"}                   ignore SIGTERM to exercise kill escalation
  *   {"fake":"reply"}                         stream one assistant message whose text is every result so far, joined by " | "
+ *   {"fake":"wait-for-user"}                 pause until the next user message arrives on stdin (a kept-alive process's next turn)
  * FAKE_CLAUDE_STDIN, when set, receives the stdin it read.
  */
 import { readFileSync, writeFileSync } from "node:fs";
@@ -58,14 +59,17 @@ async function writeReply(text) {
 const mcpConfig = readFileSync(process.argv[process.argv.indexOf("--mcp-config") + 1], "utf8");
 
 let input = "";
-let receiveUser;
-const userReceived = new Promise((resolve) => { receiveUser = resolve; });
+let userMessages = 0;
+let userArrived = () => {};
+async function waitForUserMessages(count) {
+	while (userMessages < count) await new Promise((resolve) => { userArrived = resolve; });
+}
 createInterface({ input: process.stdin }).on("line", async (line) => {
 	input += `${line}\n`;
 	const message = JSON.parse(line);
 	if (message.type !== "control_request") {
 		if (process.env.FAKE_CLAUDE_STDIN) writeFileSync(process.env.FAKE_CLAUDE_STDIN, input);
-		receiveUser(); return;
+		userMessages++; userArrived(); return;
 	}
 	if (message.request.subtype === "initialize") {
 		if (process.env.FAKE_CLAUDE_INIT === "ignore") return;
@@ -80,7 +84,8 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
 		} }));
 	}
 });
-await userReceived;
+let expectedUserMessages = 1;
+await waitForUserMessages(expectedUserMessages);
 
 let bridge = null;
 const results = [];
@@ -104,6 +109,10 @@ for (const line of lines) {
 	}
 	if (directive.fake === "wait-for-message") {
 		await parentMessages.next();
+		continue;
+	}
+	if (directive.fake === "wait-for-user") {
+		await waitForUserMessages(++expectedUserMessages);
 		continue;
 	}
 	if (directive.fake === "sleep") {

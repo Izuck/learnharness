@@ -26,7 +26,7 @@ process.env.LH_DATA_DIR = testData;
 after(() => rmSync(testData, { recursive: true, force: true }));
 const { PATHS, SETTINGS_FILE } = await import("../config.ts");
 const { readSettings, writeSettings } = await import("../src/store/settings.ts");
-const { LIVE_PROCESS_IDLE_TIMEOUT_MS, liveProcessIdleTimeoutMs } = await import("../src/agent/claude-code/live-processes.ts");
+const { killAllLiveProcesses, LIVE_PROCESS_IDLE_TIMEOUT_MS, liveProcessIdleTimeoutMs } = await import("../src/agent/claude-code/live-processes.ts");
 const { CLAUDE_CODE_MODELS } = await import("../src/agent/claude-code/provider.ts");
 const { createClaudeCodeStreamFunction } = await import("../src/agent/claude-code/stream.ts");
 const { createTeacherAgent } = await import("../src/agent/teacher-agent.ts");
@@ -203,6 +203,7 @@ test("switching off blocks future requests but does not interrupt an already adm
 	child.send("continue"); await finished;
 	assert(getLastAssistantText(chatId).length > 0, "the admitted turn completes normally");
 	assert.equal(readSettings()?.claudeCode?.enabled, false);
+	killAllLiveProcesses(); // The finished turn kept its process idle for the next message.
 	await waitForExit(child);
 });
 
@@ -226,6 +227,7 @@ test("a question answered before the idle timeout continues the waiting CLI proc
 	assert.deepEqual(cliContextWindowOf(chatStore.getChat(chatId)!.messages), { model: "claude-code:sonnet", tokens: 200000 });
 	assert.deepEqual(cliContextWindowOf(JSON.parse(readFileSync(join(PATHS.chats, `${chatId}.json`), "utf8")).messages), { model: "claude-code:sonnet", tokens: 200000 });
 	assert.ok(getLastAssistantText(chatId).includes(ANSWER_TEXT), getLastAssistantText(chatId));
+	killAllLiveProcesses(); // The finished turn kept its process idle for the next message.
 	await waitForExit(waiting);
 });
 
@@ -254,6 +256,7 @@ test("a question pauses later calls from the same CLI response until the learner
 	assert.equal(fakeRun.children.length, 1);
 	assert.ok(getLastAssistantText(chatId).includes(ANSWER_TEXT));
 	assert.ok(getLastAssistantText(chatId).includes("HTTP next"));
+	killAllLiveProcesses(); // The finished turn kept its process idle for the next message.
 	await waitForExit(fakeRun.children[0]!);
 });
 
@@ -288,6 +291,7 @@ test("an individually cancelled MCP question queued behind a learner wait never 
 	assert.equal(danglingQuestionOf(chatStore.getChat(chatId)?.messages ?? []), null);
 	assert.equal(JSON.stringify(chatStore.getChat(chatId)?.messages).includes(cancelledId), false, "cancelled B must never reach native tool execution or persistence");
 	assert.ok(getLastAssistantText(chatId).includes(ANSWER_TEXT));
+	killAllLiveProcesses(); // The finished turn kept its process idle for the next message.
 	await waitForExit(child);
 });
 
@@ -316,4 +320,39 @@ test("a question answered after the idle timeout starts a fresh CLI process that
 	assert.ok(replay.includes(ASK_INPUT.question), replay);
 	assert.ok(replay.includes("[tool result ask_user_question]"), replay);
 	assert.ok(replay.includes(ANSWER_TEXT), replay);
+});
+
+/** The recorded text turn, optionally led by a thinking block (which must survive the store round trip). */
+function textTurn(withThinking: boolean): string[] {
+	const lines = readFileSync(TEXT_FIXTURE, "utf8").trim().split("\n");
+	if (!withThinking) return lines;
+	const blockStart = lines.findIndex((line) => line.includes('"content_block_start"'));
+	const shifted = lines.map((line) => line.replace(/"index":0/g, '"index":1'));
+	return [...shifted.slice(0, blockStart),
+		streamEvent({ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } }),
+		streamEvent({ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "They know little; start from bytes." } }),
+		streamEvent({ type: "content_block_stop", index: 0 }),
+		...shifted.slice(blockStart)];
+}
+
+for (const withThinking of [false, true]) test(`the learner's next message continues the same CLI process instead of replaying the lesson${withThinking ? " (with thinking)" : ""}`, async (t) => {
+	const first = textTurn(withThinking);
+	const second = first.map((line) => line.replaceAll("hello there", "sockets carry bytes"));
+	const fakeRun = createFakeRun(t, [[...first, JSON.stringify({ fake: "wait-for-user" }), ...second]]);
+	const factory = createAgentFactory(fakeRun);
+	const chatId = createClaudeCodeChat(t);
+
+	await runChatTurn(chatId, { type: "text", text: "teach me sockets" }, factory);
+	assert.equal(getLastAssistantText(chatId), "hello there");
+	const stored = chatStore.getChat(chatId)?.messages.findLast((message) => message.role === "assistant");
+	assert.equal(stored?.role === "assistant" && stored.content.some((block) => block.type === "thinking"), withThinking);
+	await runChatTurn(chatId, { type: "text", text: "go on" }, factory);
+
+	assert.equal(fakeRun.children.length, 1, "the stored lesson must match what the live process holds");
+	assert.equal(getLastAssistantText(chatId), "sockets carry bytes");
+	const users = readFileSync(fakeRun.stdinFiles[0]!, "utf8").split("\n").filter(Boolean).filter((line) => JSON.parse(line).type === "user");
+	assert.equal(users.length, 2);
+	assert.ok(users[1]!.includes("go on") && !users[1]!.includes("teach me sockets"), users[1]);
+	killAllLiveProcesses();
+	await waitForExit(fakeRun.children[0]!);
 });

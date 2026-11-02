@@ -19,6 +19,7 @@ import {
 	type ToolCall,
 	type ToolResultMessage,
 	type TranscriptContext,
+	type UserMessage,
 } from "@earendil-works/pi-ai";
 import type { AnthropicEffort } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.models";
@@ -32,10 +33,10 @@ import { parseCliLine, type CliBlock, type CliEvent, type CliUsage } from "./cli
 import { ClaudeCodeError } from "./constants.ts";
 import { cliErrorMessage, type RateLimitInfo } from "../../core/cli-errors.ts";
 import { ContextWindowProbe } from "./context-window.ts";
-import { addLiveProcess, getLiveProcess, removeLiveProcess, type LiveProcess } from "./live-processes.ts";
+import { addIdleProcess, addLiveProcess, getLiveProcess, removeLiveProcess, type LiveProcess } from "./live-processes.ts";
 import { configurationForReuse, conversationForReuse } from "./reuse-context.ts";
 import { BRIDGE_SERVER_NAME, createToolBridge, toolNameFromMcp, type PendingToolCall, type ToolBridge } from "./tool-bridge.ts";
-import { toClaudeInput, toStreamJsonLine } from "./transcript.ts";
+import { toClaudeInput, toContinuationContent, toStreamJsonLine } from "./transcript.ts";
 
 type RunClaudeOptions = { cwd: string; env: NodeJS.ProcessEnv; signal?: AbortSignal };
 
@@ -483,8 +484,25 @@ async function removeTurnResources(bridge: ToolBridge, files: TurnFiles): Promis
 	]);
 }
 
+/**
+ * A CLI process and the turns it serves; one process can serve a whole lesson (forest spec C).
+ *
+ *   streaming ──admitted tool calls, with a session──▶ awaitingResults ──matching tool results──▶ streaming
+ *   streaming ──done(stop), with a session──▶ idle ──the held lesson plus new user messages──▶ streaming
+ *   any phase ──failure, abort, mismatch, timeout, eviction, output while idle, shutdown──▶ stopped
+ *
+ * streaming: stdout feeds this.turn. awaitingResults: held MCP calls wait for pi's tool results
+ * (registered). idle: the turn is over and stdin stays open for the lesson's next message
+ * (registered); anything the CLI does on its own while idle ends it. stopped (stopping/closed) is
+ * never reused; a failure after an admitted slice is still reported once, to that slice's
+ * continuation (pendingError). `conversation` is the model-visible lesson the CLI holds, in
+ * conversationForReuse form, so a continuation is only taken when the history plainly extends it.
+ */
+type Phase = "streaming" | "awaitingResults" | "idle";
+
 class ClaudeProcess implements LiveProcess {
 	toolCallIds: string[] = [];
+	private phase: Phase = "streaming";
 	private stderr = "";
 	private closed = false;
 	private stopping = false;
@@ -500,6 +518,9 @@ class ClaudeProcess implements LiveProcess {
 	private contextWindow: number | undefined;
 	private resolvedModel: string | undefined;
 	private contextProbe: ContextWindowProbe | undefined;
+	// A turn continued from idle that the process never answered (it exited before any output)
+	// replays on a fresh process instead of failing: nothing was shown or admitted yet.
+	private replayIfLost: (() => void) | undefined;
 
 	constructor(
 		private readonly child: ChildProcessWithoutNullStreams,
@@ -512,11 +533,13 @@ class ClaudeProcess implements LiveProcess {
 		private conversation: unknown[],
 	) {}
 
+	get isIdle(): boolean { return this.phase === "idle"; }
+
 	start(stdinLine: string, signal: AbortSignal | undefined): void {
 		this.child.once("close", (code: number | null) => this.handleClose(`claude CLI exited with code ${code}`));
 		this.child.once("error", (error) => {
 			console.error("claude CLI process failed:", error);
-			this.turn.fail(START_FAILED_MESSAGE, "error");
+			if (!this.lostBeforeOutput()) this.turn.fail(START_FAILED_MESSAGE, "error");
 			this.handleClose(START_FAILED_MESSAGE);
 		});
 		this.child.stderr.setEncoding("utf8");
@@ -537,7 +560,7 @@ class ClaudeProcess implements LiveProcess {
 
 	canContinue(owner: symbol, sessionId: string | undefined, configuration: unknown, messages: Message[], results: ToolResultMessage[]): boolean {
 		const conversation = conversationForReuse(messages);
-		return !this.stopping && owner === this.owner && !!sessionId && sessionId === this.sessionId
+		return this.phase === "awaitingResults" && !this.stopping && owner === this.owner && !!sessionId && sessionId === this.sessionId
 			&& isDeepStrictEqual(configuration, this.configuration)
 			&& isDeepStrictEqual(conversation.slice(0, this.conversation.length), this.conversation)
 			&& conversation.length === this.conversation.length + this.admitted.length
@@ -551,9 +574,9 @@ class ClaudeProcess implements LiveProcess {
 		const admitted = this.admitted;
 		this.admitted = [];
 		this.conversation = structuredClone(conversationForReuse(messages));
-		this.turn = turn;
-		this.turn.setContextWindow(this.contextWindow);
-		this.turn.setResolvedModel(this.resolvedModel);
+		this.phase = "streaming";
+		this.replayIfLost = undefined;
+		this.beginTurn(turn);
 		this.sourceComplete = this.sourceCalls.length > 0;
 		this.setSignal(signal);
 		if (this.stopping) return;
@@ -564,8 +587,46 @@ class ClaudeProcess implements LiveProcess {
 		this.flushAdmissions();
 	}
 
+	/**
+	 * The new learner messages when `messages` is exactly the lesson this idle process holds plus
+	 * user messages after it, under the same configuration; null for anything else (an edited,
+	 * retried or compacted history, a changed setting, a tool result, nothing new).
+	 */
+	continuationOf(owner: symbol, sessionId: string | undefined, configuration: unknown, messages: Message[]): UserMessage[] | null {
+		if (this.phase !== "idle" || this.stopping || this.closed) return null;
+		if (owner !== this.owner || !sessionId || sessionId !== this.sessionId) return null;
+		if (!isDeepStrictEqual(configuration, this.configuration)) return null;
+		const visible = messages.filter((message) => message.role !== "system");
+		const conversation = conversationForReuse(visible);
+		if (conversation.length <= this.conversation.length) return null;
+		if (!isDeepStrictEqual(conversation.slice(0, this.conversation.length), this.conversation)) return null;
+		const added = visible.slice(this.conversation.length);
+		return added.every((message): message is UserMessage => message.role === "user") ? added : null;
+	}
+
+	/** Writes the new learner messages to the idle process; its answer streams into `turn`. */
+	continueWithMessages(turn: ClaudeTurn, messages: Message[], added: UserMessage[], signal: AbortSignal | undefined, replayIfLost: () => void): void {
+		removeLiveProcess(this);
+		this.conversation = structuredClone(conversationForReuse(messages));
+		this.phase = "streaming";
+		this.beginTurn(turn);
+		// Per-turn state starts clean; a turn's own counters (native-only messages) live on the turn.
+		this.sourceCalls = [];
+		this.sourceComplete = false;
+		this.admitted = [];
+		this.toolCallIds = [];
+		this.cancelledIds.clear();
+		this.ignoredNativeCalls.clear();
+		this.replayIfLost = replayIfLost;
+		this.setSignal(signal);
+		if (this.stopping) return;
+		this.child.stdin.write(`${toStreamJsonLine(toContinuationContent(added))}\n`);
+	}
+
 	kill(): void {
 		removeLiveProcess(this);
+		clearTimeout(this.trailerTimer);
+		this.trailerTimer = undefined;
 		if (this.stopping || this.closed) return;
 		this.stopping = true;
 		this.contextProbe?.close();
@@ -578,7 +639,7 @@ class ClaudeProcess implements LiveProcess {
 		// A parallel request can fail after the admitted slice was handed to
 		// Pi. Retain that failure for its continuation instead of silently
 		// replaying and hiding the compatibility error.
-		if (this.sessionId && this.turn.finished && this.toolCallIds.length > 0) this.pendingError = message;
+		if (this.sessionId && this.phase === "awaitingResults" && this.turn.finished && this.toolCallIds.length > 0) this.pendingError = message;
 		this.turn.fail(message, "error");
 		this.kill();
 		if (this.pendingError) addLiveProcess(this);
@@ -601,9 +662,20 @@ class ClaudeProcess implements LiveProcess {
 		this.turn.withdraw(call.id);
 	}
 
+	/** An authenticated MCP request reached the bridge. */
+	handleMcpCall(): void {
+		if (this.phase === "idle") {
+			// No turn asked for anything: a request now belongs to no streamed intent and never runs.
+			console.warn("claude CLI made a tool call while idle; ending it");
+			this.kill();
+			return;
+		}
+		this.flushAdmissions();
+	}
+
 	/** Only authenticated MCP requests, never stdout intent alone, admit side effects. */
 	flushAdmissions(): void {
-		if (this.stopping || this.turn.finished || !this.sourceComplete) return;
+		if (this.phase !== "streaming" || this.stopping || this.turn.finished || !this.sourceComplete) return;
 		const pending = this.bridge.getPendingToolCalls();
 		if (pending.length === 0) return;
 		const calls: ToolCall[] = [];
@@ -620,8 +692,10 @@ class ClaudeProcess implements LiveProcess {
 		this.toolCallIds = pending.map((call) => call.id);
 		this.turn.admit(calls);
 		this.conversation.push(...structuredClone(conversationForReuse([this.turn.getMessage()])));
-		if (this.sessionId) addLiveProcess(this);
-		else this.kill(); // No trusted scope: return the batch, then use fresh replay.
+		if (this.sessionId) {
+			this.phase = "awaitingResults";
+			addLiveProcess(this);
+		} else this.kill(); // No trusted scope: return the batch, then use fresh replay.
 	}
 
 	private readonly abort = () => {
@@ -636,15 +710,24 @@ class ClaudeProcess implements LiveProcess {
 		if (signal?.aborted) this.abort();
 	}
 
+	private beginTurn(turn: ClaudeTurn): void {
+		this.turn = turn;
+		this.turn.setContextWindow(this.contextWindow);
+		// The CLI reports init once per process: every later turn carries the model it resolved.
+		this.turn.setResolvedModel(this.resolvedModel);
+	}
+
 	private handleLine(line: string): void {
 		if (this.stopping || !line.trim()) return;
 		if (this.contextProbe?.handle(JSON.parse(line))) return;
 		const event = parseCliLine(line);
 		if (this.turn.trailerPending) {
-			// Whatever follows a finished response's message_stop closes it; a rate-limit report rides it.
+			// The line after a finished response's message_stop ends the wait for its trailer. A
+			// rate-limit report is that trailer and rides the response. Any other line is handled
+			// below, in whatever state the release left, so nothing after the response is swallowed.
 			if (event?.type === "rateLimit") this.turn.setRateLimit(event.info);
 			this.releaseTrailer();
-			return;
+			if (event?.type === "rateLimit" || this.stopping) return;
 		}
 		if (!event) return;
 		if (event.type === "init") {
@@ -657,6 +740,12 @@ class ClaudeProcess implements LiveProcess {
 		if (event.type === "rateLimit") {
 			// The plan-limit report rides the response; it never ends or alters the turn.
 			this.turn.setRateLimit(event.info);
+			return;
+		}
+		if (this.phase === "idle") {
+			// The CLI acted without being asked: it no longer holds the lesson the snapshot describes.
+			console.warn("claude CLI produced output while idle; ending it:", event.type);
+			this.kill();
 			return;
 		}
 		if (event.type === "toolResults") {
@@ -694,7 +783,7 @@ class ClaudeProcess implements LiveProcess {
 		if (event.type === "messageStart") this.contextProbe?.refresh();
 		if (event.type === "blockStart" && event.block.type === "toolUse" && !isBridgeToolName(event.block.name)) this.ignoredNativeCalls.set(event.block.id, event.block.name);
 		this.turn.handle(event);
-		if (this.turn.finished) { this.kill(); return; }
+		if (this.turn.finished) { this.settle(); return; }
 		if (this.turn.trailerPending) {
 			this.trailerTimer ??= setTimeout(() => this.releaseTrailer(), TRAILER_GRACE_MS);
 			this.trailerTimer.unref();
@@ -724,34 +813,96 @@ class ClaudeProcess implements LiveProcess {
 		clearTimeout(this.trailerTimer);
 		this.trailerTimer = undefined;
 		this.turn.finishPending();
-		if (this.turn.finished) this.kill();
+		this.settle();
+	}
+
+	/** A finished streaming turn decides the process's fate: a lesson's normal answer keeps it idle. */
+	private settle(): void {
+		if (this.phase !== "streaming" || !this.turn.finished) return;
+		const message = this.turn.getMessage();
+		// Never keep a process in a state the snapshot cannot describe: an error, a cut-off answer,
+		// a response that also streamed tool intents, or MCP requests nobody admitted.
+		const clean = message.stopReason === "stop" && this.turn.getIntents().length === 0 && this.bridge.getPendingToolCalls().length === 0;
+		if (this.sessionId && !this.stopping && !this.closed && clean) this.becomeIdle(message);
+		else this.kill();
+	}
+
+	private becomeIdle(message: AssistantMessage): void {
+		this.phase = "idle";
+		this.replayIfLost = undefined;
+		this.toolCallIds = [];
+		this.conversation.push(...structuredClone(conversationForReuse([message])));
+		// The finished turn's signal no longer owns the process: a later abort of it ends nothing.
+		this.setSignal(undefined);
+		addIdleProcess(this);
+	}
+
+	/** The process ended or failed to run before a continued turn produced anything. */
+	private lostBeforeOutput(): boolean {
+		return !!this.replayIfLost && this.phase === "streaming" && !this.turn.started && !this.turn.finished && !this.signal?.aborted;
 	}
 
 	private handleClose(message: string): void {
 		if (this.closed) return;
 		this.closed = true;
+		const replay = this.lostBeforeOutput() ? this.replayIfLost : undefined;
+		this.replayIfLost = undefined;
 		clearTimeout(this.trailerTimer);
 		this.turn.finishPending();
 		this.contextProbe?.close();
 		clearTimeout(this.killTimer);
-		removeLiveProcess(this);
-		if (this.pendingError) addLiveProcess(this);
+		// A retained failure stays registered for its continuation; once taken out, it never comes back.
+		if (!this.pendingError) removeLiveProcess(this);
 		this.signal?.removeEventListener("abort", this.abort);
 		if (this.stderr.trim()) console.error("claude CLI stderr:", this.stderr.trim());
-		this.turn.fail(message, "error");
+		if (replay) {
+			console.warn("claude CLI ended before answering a continued message; replaying the lesson on a fresh process");
+			replay();
+		} else this.turn.fail(message, "error");
 		removeTurnResources(this.bridge, this.files).catch((error: unknown) => {
 			console.error("claude CLI cleanup failed:", error);
 		});
 	}
 }
 
-function continueLiveProcess(turn: ClaudeTurn, owner: symbol, sessionId: string | undefined, configuration: unknown, messages: Message[], signal: AbortSignal | undefined): boolean {
+function hasSameIds(ids: string[], otherIds: string[]): boolean {
+	return ids.length === otherIds.length && new Set(otherIds).size === otherIds.length && ids.every((id) => otherIds.includes(id));
+}
+
+/**
+ * Hands the turn to the lesson's live process when the history plainly continues what that process
+ * holds: tool results for the calls it is waiting on, or new user messages after its finished
+ * answer. Anything else kills it and the caller replays the lesson on a fresh process.
+ */
+function continueLiveProcess(
+	turn: ClaudeTurn,
+	owner: symbol,
+	sessionId: string | undefined,
+	configuration: unknown,
+	messages: Message[],
+	signal: AbortSignal | undefined,
+	replay: () => void,
+): boolean {
+	const process = getLiveProcess(owner, sessionId);
+	if (!(process instanceof ClaudeProcess)) return false;
+
+	if (process.isIdle) {
+		const added = process.continuationOf(owner, sessionId, configuration, messages);
+		if (!added) {
+			process.kill();
+			return false;
+		}
+		process.continueWithMessages(turn, messages, added, signal, replay);
+		return true;
+	}
+
 	const assistantIndex = messages.findLastIndex((message) => message.role === "assistant");
 	const assistant = messages[assistantIndex];
-	if (assistant?.role !== "assistant") return false;
-	const ids = assistant.content.flatMap((block) => block.type === "toolCall" ? [block.id] : []);
-	const process = getLiveProcess(ids, owner, sessionId);
-	if (!(process instanceof ClaudeProcess)) return false;
+	const ids = assistant?.role === "assistant" ? assistant.content.flatMap((block) => block.type === "toolCall" ? [block.id] : []) : [];
+	if (ids.length === 0 || !hasSameIds(process.toolCallIds, ids)) {
+		process.kill();
+		return false;
+	}
 	if (process.consumeFailure(owner, turn)) return true;
 	const trailing = messages.slice(assistantIndex + 1);
 	const results = trailing.filter((message) => message.role === "toolResult");
@@ -804,7 +955,7 @@ async function startProcess(
 	const input = toClaudeInput(context.messages);
 	let cliProcess: ClaudeProcess | undefined;
 	const bridge = await createToolBridge(input.tools, {
-		onCall: () => cliProcess?.flushAdmissions(),
+		onCall: () => cliProcess?.handleMcpCall(),
 		onError: (error) => cliProcess?.fail(error.message),
 		onCancel: (call) => cliProcess?.cancelCall(call),
 	});
@@ -855,12 +1006,14 @@ export function createClaudeCodeStreamFunction(runClaude: RunClaude): StreamFunc
 		const env = toClaudeEnv(model);
 		// An existing child must not retain stale authentication/routing after env changes.
 		const configuration = { request: configurationForReuse(model, context, toEffort(options?.reasoning)), env };
-		if (continueLiveProcess(turn, owner, options?.sessionId, configuration, context.messages, options?.signal)) return stream;
-
-		startProcess(runClaude, turn, model, context, options, owner, configuration, env).catch((error: unknown) => {
-			console.error("claude CLI turn failed:", error);
-			turn.fail(options?.signal?.aborted ? ABORT_MESSAGE : error instanceof ClaudeLaunchError ? error.message : START_FAILED_MESSAGE, options?.signal?.aborted ? "aborted" : "error");
-		});
+		// Today's path, and the fallback whenever the lesson's live process cannot take the turn.
+		const replay = () => {
+			startProcess(runClaude, turn, model, context, options, owner, configuration, env).catch((error: unknown) => {
+				console.error("claude CLI turn failed:", error);
+				turn.fail(options?.signal?.aborted ? ABORT_MESSAGE : error instanceof ClaudeLaunchError ? error.message : START_FAILED_MESSAGE, options?.signal?.aborted ? "aborted" : "error");
+			});
+		};
+		if (!continueLiveProcess(turn, owner, options?.sessionId, configuration, context.messages, options?.signal, replay)) replay();
 
 		return stream;
 	};

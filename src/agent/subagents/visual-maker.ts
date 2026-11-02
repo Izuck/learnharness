@@ -3,6 +3,7 @@ import type { AssistantMessage, Message, Tool, ToolResultMessage, Usage } from "
 import { normalizeContext } from "@earendil-works/pi-ai";
 import { processImage, type ProcessImageResult } from "../image-processing/index.ts";
 import { Type } from "typebox";
+import { endLiveSession } from "../claude-code/live-processes.ts";
 import { piEngineFor, type PiEngine, type ThinkingLevel } from "../models.ts";
 import { providerEventObserver, type ProviderEventObserver } from "../provider-events.ts";
 import type { VisualResult } from "../../core/contracts.ts";
@@ -296,6 +297,9 @@ export async function runVisualMaker(input: VisualMakerInput, opts: VisualMakerO
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
 		return { svg: "", notes: `FAILED: the maker crashed — ${msg}` };
+	} finally {
+		// The job is over: its kept CLI process (if any) will get no next message.
+		endLiveSession(sessionId);
 	}
 
 	// Iteration limit: deliver the last written SVG only if it was looked at.

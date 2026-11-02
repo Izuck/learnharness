@@ -4,6 +4,7 @@ import { normalizeContext } from "@earendil-works/pi-ai";
 import { processImage, type ProcessImageResult } from "../image-processing/index.ts";
 import { Type } from "typebox";
 import { resolveSourcePath } from "../tools/fs-shared.ts";
+import { endLiveSession } from "../claude-code/live-processes.ts";
 import { piEngineFor, type PiEngine, type ThinkingLevel } from "../models.ts";
 import { providerEventObserver, type ProviderEventObserver } from "../provider-events.ts";
 import type { PdfResult, PdfToolInput } from "../../core/contracts.ts";
@@ -343,6 +344,9 @@ export async function runPdfReaderAgent(
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
 		return { path: pdfPath, question: input.question, brief: `PDF failed: the reader crashed — ${msg}`, pagesRead: [...read].sort((a, b) => a - b), pagesConsulted: [...consulted].sort((a, b) => a - b) };
+	} finally {
+		// The job is over: its kept CLI process (if any) will get no next message.
+		endLiveSession(sessionId);
 	}
 
 	// Iteration limit: deliver whatever was honestly consulted (never invention).

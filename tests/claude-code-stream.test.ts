@@ -34,7 +34,7 @@ import { Type } from "typebox";
 
 import { parseCliLine } from "../src/agent/claude-code/cli-events.ts";
 import { ClaudeCodeError } from "../src/agent/claude-code/constants.ts";
-import { LIVE_PROCESS_IDLE_TIMEOUT_MS, liveProcessIdleTimeoutMs } from "../src/agent/claude-code/live-processes.ts";
+import { killAllLiveProcesses, LIVE_PROCESS_IDLE_TIMEOUT_MS, liveProcessIdleTimeoutMs } from "../src/agent/claude-code/live-processes.ts";
 import { CLAUDE_CODE_MODELS } from "../src/agent/claude-code/provider.ts";
 import { authEnvRecord } from "../src/core/auth-env.ts";
 import { ClaudeLaunchError } from "../src/agent/claude-code/launch.ts";
@@ -341,6 +341,7 @@ test("text scenario streams start, text_start, text_delta…, text_end, done(sto
 	assert.equal(done.message.api, "claude-code-cli");
 	assert.equal(done.message.model, "opus");
 
+	killAllLiveProcesses(); // A finished lesson turn keeps its process idle (tests/claude-code-keepalive.test.ts).
 	await assertCleanedUp(getOnlyCall(calls));
 });
 
@@ -663,6 +664,7 @@ test("the CLI's real ordering (rate_limit_event AFTER message_stop, before resul
 	const done = getLastEvent(events);
 	assert.ok(done.type === "done");
 	assert.deepEqual((done.message as { cliRateLimit?: unknown }).cliRateLimit, { status: "allowed_warning", resetsAt: 4_000_000_000 });
+	killAllLiveProcesses(); // A finished lesson turn keeps its process idle (tests/claude-code-keepalive.test.ts).
 	await assertCleanedUp(getOnlyCall(calls));
 });
 
@@ -688,6 +690,7 @@ test("the CLI init event's resolved model rides the message as cliResolvedModel"
 	assert.equal((done.message as { cliResolvedModel?: string }).cliResolvedModel, "claude-haiku-5-5");
 	assert.equal(done.message.model, "opus");
 
+	killAllLiveProcesses(); // A finished lesson turn keeps its process idle (tests/claude-code-keepalive.test.ts).
 	await assertCleanedUp(getOnlyCall(calls));
 });
 
@@ -717,6 +720,7 @@ test("trailing toolResults matching a live process continue it: held calls answe
 
 	assert.equal(toolMessage.stopReason, "toolUse");
 	assert.equal(getText(reply), "contents of a");
+	killAllLiveProcesses(); // A finished lesson turn keeps its process idle (tests/claude-code-keepalive.test.ts).
 	await assertCleanedUp(getOnlyCall(calls));
 });
 
@@ -867,6 +871,7 @@ test("a tool result arriving after the idle timeout starts fresh with the call a
 	const reply = await runTurn(streamFunction, [HI, toolMessage, toToolResult(readA, "contents of a")]);
 
 	assert.equal(getText(reply), "hello there");
+	killAllLiveProcesses(); // A finished lesson turn keeps its process idle (tests/claude-code-keepalive.test.ts).
 	await assertCleanedUp(getOnlyCall(fresh.calls));
 
 	const stdin = readFileSync(stdinFile, "utf8");
@@ -889,6 +894,7 @@ test("a tool result arriving late but before the idle timeout still continues th
 	const reply = await runTurn(streamFunction, [HI, toolMessage, toToolResult(readA, "contents of a")]);
 
 	assert.equal(getText(reply), "contents of a");
+	killAllLiveProcesses(); // A finished lesson turn keeps its process idle (tests/claude-code-keepalive.test.ts).
 	await assertCleanedUp(getOnlyCall(calls));
 });
 
@@ -963,7 +969,8 @@ test("output after MCP admission fails continuation instead of silently replayin
 });
 
 test("normal completion escalates termination when the child ignores SIGTERM", async (t) => {
-	const { events, calls } = await runScenario(t, [JSON.stringify({ fake: "ignore-term" }), ...readFixtureLines("text.jsonl"), HOLD]);
+	// Without a session the finished turn ends its process (a lesson's would be kept idle).
+	const { events, calls } = await runScenario(t, [JSON.stringify({ fake: "ignore-term" }), ...readFixtureLines("text.jsonl"), HOLD], { sessionId: undefined });
 	assert.equal(getLastEvent(events).type, "done");
 	await assertCleanedUp(getOnlyCall(calls));
 	assert.equal(getOnlyCall(calls).child.signalCode, "SIGKILL");
@@ -1050,6 +1057,7 @@ for (const identicalHistory of [false, true]) test(`one registered stream isolat
 	assert.equal(getText(replyTwo), "from two");
 	assert.equal(getText(replyOne), "from one");
 	assert.equal(spawns, 2);
+	killAllLiveProcesses(); // A finished lesson turn keeps its process idle (tests/claude-code-keepalive.test.ts).
 	await assertCleanedUp(getOnlyCall(one.calls));
 	await assertCleanedUp(getOnlyCall(two.calls));
 });

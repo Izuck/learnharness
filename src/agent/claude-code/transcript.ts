@@ -1,4 +1,4 @@
-import type { ImageContent, Message, TextContent, Tool } from "@earendil-works/pi-ai";
+import type { ImageContent, Message, TextContent, Tool, UserMessage } from "@earendil-works/pi-ai";
 import { getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
 
 export type ClaudeContentBlock =
@@ -92,6 +92,12 @@ export function toClaudeInput(messages: Message[]): ClaudeInput {
 		tools: getCurrentTools(messages),
 		userContent: toUserContent(conversation),
 	};
+}
+
+/** New learner messages for a live process that already holds the lesson: their own content,
+ *  unlabelled, as one user message (separate lines could each start a response of their own). */
+export function toContinuationContent(messages: UserMessage[]): ClaudeContentBlock[] {
+	return messages.flatMap((message) => toUnlabelledBlocks(message.content));
 }
 
 export function toStreamJsonLine(content: ClaudeContentBlock[]): string {
