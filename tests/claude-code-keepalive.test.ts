@@ -571,6 +571,26 @@ test("a turn that admits tool calls after lessons moved off the CLI is not kept 
 	await waitForExit(spawns[0]!.child);
 });
 
+test("a switch landing while the process is still starting makes it stale: killed at idle, never registered", async (t) => {
+	const { runClaude: spawnFake, spawns } = createFakeRun(t, [[...textMessage("one"), WAIT_FOR_USER, ...textMessage("two")]]);
+	// The move to the API lands inside startProcess's awaits: after the turn was asked for, before
+	// the child is returned (and so before the ClaudeProcess exists).
+	const runClaude: RunClaude = async (args, options) => {
+		await sleep(20);
+		endAllLiveSessions();
+		return spawnFake(args, options);
+	};
+	const stream = createClaudeCodeStreamFunction(runClaude);
+	const first = await runTurn(stream, [HI]);
+	assert.equal(textOf(first), "one", "the turn itself finishes normally");
+	await waitForExit(spawns[0]!.child);
+
+	// Nothing was registered for the lesson: the next message replays on a fresh process.
+	const second = await runTurn(stream, [HI, first, NEXT]);
+	assert.equal(textOf(second), "one", "a fresh process (its own scenario run) answered, not a continued one");
+	assert.equal(spawns.length, 2, "the stale process was not reused");
+});
+
 test("a turn that starts after the move is kept as usual", async (t) => {
 	const { runClaude, spawns } = createFakeRun(t, [[...textMessage("one"), WAIT_FOR_USER, ...textMessage("two")]]);
 	endAllLiveSessions();

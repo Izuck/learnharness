@@ -576,7 +576,7 @@ class ClaudeProcess implements LiveProcess {
 	private replayIfLost: (() => void) | undefined;
 	// The live-process generation this turn started under: the app moving lessons off the CLI bumps
 	// it, and a process from before the bump is ended instead of registered (see isStale).
-	private generation = liveGeneration();
+	private generation: number;
 
 	constructor(
 		private readonly child: ChildProcessWithoutNullStreams,
@@ -587,7 +587,12 @@ class ClaudeProcess implements LiveProcess {
 		readonly sessionId: string | undefined,
 		private readonly configuration: unknown,
 		private conversation: unknown[],
-	) {}
+		/** The generation read when the turn was asked for, not when the child finished starting:
+		 *  a switch landing during startProcess's awaits must still make this process stale. */
+		generation: number,
+	) {
+		this.generation = generation;
+	}
 
 	get isIdle(): boolean { return this.phase === "idle"; }
 
@@ -1019,6 +1024,8 @@ async function startProcess(
 	owner: symbol,
 	configuration: unknown,
 	env: NodeJS.ProcessEnv,
+	// Evaluated on the call, before the first await. A replay passes the originating turn's own.
+	generation: number = liveGeneration(),
 ): Promise<void> {
 	if (options?.signal?.aborted) { turn.fail(ABORT_MESSAGE, "aborted"); return; }
 	const input = toClaudeInput(context.messages);
@@ -1062,7 +1069,7 @@ async function startProcess(
 		return;
 	}
 
-	cliProcess = new ClaudeProcess(child, bridge, files, turn, owner, options?.sessionId, configuration, structuredClone(conversationForReuse(context.messages)));
+	cliProcess = new ClaudeProcess(child, bridge, files, turn, owner, options?.sessionId, configuration, structuredClone(conversationForReuse(context.messages)), generation);
 	cliProcess.start(toStreamJsonLine(input.userContent), options?.signal);
 }
 
@@ -1075,9 +1082,12 @@ export function createClaudeCodeStreamFunction(runClaude: RunClaude): StreamFunc
 		const env = toClaudeEnv(model);
 		// An existing child must not retain stale authentication/routing after env changes.
 		const configuration = { request: configurationForReuse(model, context, toEffort(options?.reasoning)), env };
+		// The generation this turn was asked for under: a replay (the lesson's process died before
+		// answering) starts a new process, which must still count as this turn's.
+		const generation = liveGeneration();
 		// Today's path, and the fallback whenever the lesson's live process cannot take the turn.
 		const replay = () => {
-			startProcess(runClaude, turn, model, context, options, owner, configuration, env).catch((error: unknown) => {
+			startProcess(runClaude, turn, model, context, options, owner, configuration, env, generation).catch((error: unknown) => {
 				console.error("claude CLI turn failed:", error);
 				turn.fail(options?.signal?.aborted ? ABORT_MESSAGE : error instanceof ClaudeLaunchError ? error.message : START_FAILED_MESSAGE, options?.signal?.aborted ? "aborted" : "error");
 			});
