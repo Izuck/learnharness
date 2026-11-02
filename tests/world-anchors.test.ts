@@ -296,6 +296,32 @@ describe("world anchors: smacof", () => {
 		});
 	}
 
+	it("strictly lowers weighted stress below its classical-MDS seed on a non-planar fixture", () => {
+		// Corners of a unit-ish box plus an off-centre point: genuinely 3D, so no 2D
+		// embedding is exact and the classical seed is not already optimal.
+		const pts = [
+			[0, 0, 0],
+			[4, 0, 0],
+			[0, 2, 0],
+			[4, 2, 0],
+			[0, 0, 1],
+			[4, 0, 1],
+			[0, 2, 1],
+			[4, 2, 1],
+			[1, 1, 3],
+		];
+		const D = pts.map((p) => pts.map((q) => Math.hypot(p[0]! - q[0]!, p[1]! - q[1]!, p[2]! - q[2]!)));
+		const mds = classicalMds(D, 2);
+		assert.ok(mds.eigenvalues[2]! > 1e-6, "a third positive eigenvalue: not embeddable in the plane");
+		const out = smacof(D, mds.coords);
+		for (const power of [0, 1, 2]) {
+			const before = weightedStress(D, mds.coords, power);
+			const after = weightedStress(D, smacof(D, mds.coords, { weightPower: power }), power);
+			assert.ok(after < before, `power ${power}: ${after} < ${before}`);
+		}
+		assert.ok(weightedStress(D, out) < weightedStress(D, mds.coords));
+	});
+
 	it("recovers a planar configuration from a perturbed start (stress ≈ 0)", () => {
 		const pts = [
 			[0, 0],
