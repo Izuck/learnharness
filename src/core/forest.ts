@@ -96,6 +96,7 @@ export function buildForest(
 	});
 
 	return {
+		worldKey: worldKeyOf(world, positioned),
 		topics,
 		regions: regionsOf(world, topics),
 		trails: trailsOf(graph.chains, merged, byId),
@@ -104,6 +105,21 @@ export function buildForest(
 		unpositioned: world.topics.length - positioned.length,
 		coverage: { mapped: topics.filter((t) => t.ideas.length > 0).length, total: topics.length },
 	};
+}
+
+/** FNV-1a over the generation time, the topic count and every positioned
+ *  topic's id and (rounded) position: a regenerated or re-laid-out world gets a
+ *  new key, an unchanged one keeps it. */
+function worldKeyOf(world: WorldFile, positioned: readonly WorldTopic[]): string {
+	let h = 0x811c9dc5;
+	const mix = (text: string) => {
+		for (let i = 0; i < text.length; i++) {
+			h ^= text.charCodeAt(i);
+			h = Math.imul(h, 0x01000193);
+		}
+	};
+	for (const t of positioned) mix(`${t.id}@${Math.round(t.position?.x ?? 0)},${Math.round(t.position?.y ?? 0)};`);
+	return `${world.generatedAt}|${world.topics.length}|${(h >>> 0).toString(16)}`;
 }
 
 /** One region per degree that has a positioned topic, at the centroid of the

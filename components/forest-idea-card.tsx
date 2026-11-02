@@ -46,7 +46,7 @@ export function ForestIdeaCard({
 		<div
 			data-testid="forest-idea-card"
 			style={style}
-			className={`lh-no-drag w-80 max-w-[calc(100%-1rem)] rounded-xl border bg-card p-4 text-left shadow-lg ${className ?? ""}`}
+			className={`lh-no-drag w-80 max-w-[calc(100%-1rem)] max-h-[70vh] overflow-y-auto rounded-xl border bg-card p-4 text-left shadow-lg ${className ?? ""}`}
 		>
 			<div className="text-sm font-medium leading-snug">{node.name}</div>
 			<div className="mt-1 text-xs leading-relaxed text-muted-foreground">{node.statement}</div>

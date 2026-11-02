@@ -1,7 +1,7 @@
 import React, { act } from "react";
 (globalThis as Record<string, unknown>).React = React;
 import assert from "node:assert/strict";
-import { afterEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { parseHTML } from "linkedom";
@@ -18,7 +18,11 @@ const noopContext = (): CanvasRenderingContext2D | null => {
 	const store: Record<string | symbol, unknown> = {};
 	const callable = (prop: string | symbol) => new Proxy(function () {}, {
 		get: (_t, p) => (p === "addColorStop" ? () => {} : undefined),
-		apply: () => { if (prop === "fillRect") fills++; return undefined; },
+		apply: () => {
+			if (prop === "fillRect") fills++;
+			if (prop === "createRadialGradient" || prop === "createLinearGradient") return { addColorStop() {} };
+			return undefined;
+		},
 	});
 	return new Proxy(store, {
 		get: (target, prop) => (prop in target ? target[prop] : callable(prop)),
@@ -36,6 +40,16 @@ class TestIntersectionObserver {
 class TestPath2D {
 	moveTo() {} lineTo() {} arc() {} rect() {} closePath() {}
 }
+// An in-memory localStorage that logs every read, to see which camera key the view uses.
+const storage = new Map<string, string>();
+let storageReads: string[] = [];
+Object.assign(globalThis, {
+	localStorage: {
+		getItem: (k: string) => { storageReads.push(k); return storage.get(k) ?? null; },
+		setItem: (k: string, v: string) => { storage.set(k, v); },
+		removeItem: (k: string) => { storage.delete(k); },
+	},
+});
 let fetched: string[] = [];
 let snapshot: ForestSnapshot | null = null;
 /** ok: resolve the snapshot; http500 / network: fail; pending: never settle. */
@@ -65,6 +79,7 @@ Object.assign(globalThis, { HTMLCanvasElement: (dom.window as unknown as { HTMLC
 
 // Import after installing the DOM globals.
 const { ForestView } = await import("../components/forest-view.tsx");
+const { ForestCanvasRenderer } = await import("../components/forest-canvas.ts");
 const { ForestIdeaCard } = await import("../components/forest-idea-card.tsx");
 const { ServerEventsProvider } = await import("../components/server-events.tsx");
 
@@ -76,6 +91,7 @@ const topic = (id: string, ideas: string[] = []): ForestTopic => ({
 	counts: { seen: ideas.length, held: 0, fast: 0 }, glow: ideas.length > 0 ? 0.5 : 0,
 });
 const model = (over: Partial<ForestModel> = {}): ForestModel => ({
+	worldKey: "w-a",
 	topics: [topic("t1", ["n1"]), topic("t2")], regions: [{ degreeId: "physics", name: "Physics", x: 0, y: 0, topics: 2 }], trails: [],
 	uncharted: [], unplaced: 0, unpositioned: 0, coverage: { mapped: 1, total: 2 }, ...over,
 });
@@ -102,6 +118,8 @@ async function mount(s: ForestSnapshot | null): Promise<HTMLElement> {
 	return host;
 }
 afterEach(async () => {
+	storage.clear();
+	storageReads = [];
 	fetchMode = "ok";
 	contextAvailable = true;
 	await unmount?.();
@@ -111,20 +129,23 @@ afterEach(async () => {
 });
 
 describe("ForestView empty states", () => {
-	it("shows the generate step with no world", async () => {
+	it("lists generate, dedupe, layout in order with no world", async () => {
 		const el = await mount(snap(null));
 		const text = el.textContent ?? "";
-		assert.ok(text.includes("npm run world:generate"), text);
-		assert.ok(text.includes("npm run world:layout"), text);
-		assert.ok(text.indexOf("npm run world:generate") < text.indexOf("npm run world:layout"));
+		const at = (cmd: string) => text.indexOf(`npm run world:${cmd}`);
+		assert.ok(at("generate") >= 0 && at("dedupe") >= 0 && at("layout") >= 0, text);
+		assert.ok(at("generate") < at("dedupe") && at("dedupe") < at("layout"), text);
 		assert.equal(el.querySelector('a[href="/graph"]')?.getAttribute("href"), "/graph");
 		assert.deepEqual(fetched, ["/api/forest"]);
 	});
 
-	it("shows the layout step when topics have no positions", async () => {
+	it("offers dedupe as 'if you haven't yet' before layout when topics have no positions", async () => {
 		const el = await mount(snap(model({ topics: [], regions: [], unpositioned: 12, coverage: { mapped: 0, total: 0 } })));
 		const text = el.textContent ?? "";
 		assert.ok(text.includes("npm run world:layout"), text);
+		assert.ok(text.includes("npm run world:dedupe"), text);
+		assert.ok(text.includes("if you haven't yet"), text);
+		assert.ok(text.indexOf("npm run world:dedupe") < text.indexOf("npm run world:layout"), text);
 		assert.ok(!text.includes("world:generate"), text);
 	});
 });
@@ -226,6 +247,136 @@ describe("ForestView overlays", () => {
 		host?.remove();
 		el = await mount(snap(model({ unplaced: 0 })));
 		assert.ok(!(el.textContent ?? "").includes("waiting to be placed"), el.textContent ?? "");
+	});
+});
+
+describe("ForestView partly laid-out world", () => {
+	it("says how many topics still need a layout", async () => {
+		let el = await mount(snap(model({ unpositioned: 3 })));
+		assert.ok((el.textContent ?? "").includes("3 topics not laid out yet — npm run world:layout"), el.textContent ?? "");
+		await unmount?.();
+		host?.remove();
+		el = await mount(snap(model({ unpositioned: 1 })));
+		assert.ok((el.textContent ?? "").includes("1 topic not laid out yet"), el.textContent ?? "");
+		await unmount?.();
+		host?.remove();
+		el = await mount(snap(model({ unpositioned: 0 })));
+		assert.ok(!(el.textContent ?? "").includes("not laid out yet"), el.textContent ?? "");
+	});
+
+	it("shows the refresh-failed note alongside a pinned idea card", async () => {
+		const props = [node("n1", "Idea one"), node("n2", "Entropy")];
+		const el = await mount(snap(model({ uncharted: ["n2"] }), props));
+		const toggle = Array.from(el.querySelectorAll("button")).find((b) => (b.textContent ?? "").includes("Uncharted (1)"));
+		assert.ok(toggle);
+		await act(async () => { toggle.dispatchEvent(new dom.window.Event("click", { bubbles: true })); });
+		const entry = Array.from(el.querySelectorAll("button")).find((b) => (b.textContent ?? "").trim() === "Entropy");
+		assert.ok(entry);
+		await act(async () => { entry.dispatchEvent(new dom.window.Event("click", { bubbles: true })); });
+		fetchMode = "network";
+		const errors = console.error;
+		console.error = () => {};
+		try {
+			await act(async () => { dom.window.dispatchEvent(new dom.window.Event("lh:graph-revision")); });
+			for (let i = 0; i < 4; i++) await act(async () => { await Promise.resolve(); });
+		} finally {
+			console.error = errors;
+		}
+		assert.ok(el.querySelector('[data-testid="forest-idea-card"]'), "pinned card shows");
+		const note = Array.from(el.querySelectorAll("div")).find((d) => (d.textContent ?? "") === "Couldn't refresh");
+		assert.ok(note, "note shows");
+		assert.ok(!note.closest('[data-testid="forest-idea-card"]'));
+		assert.ok(!(note.getAttribute("class") ?? "").includes("right-3"), "the note does not sit in the card's top-right slot");
+	});
+});
+
+describe("ForestView camera and Fit world", () => {
+	const keyOf = (worldKey: string) => `lh.forest.camera.v2:${worldKey}`;
+	const proto = ForestCanvasRenderer.prototype as unknown as { fitWorld: () => void };
+	const realFit = proto.fitWorld;
+	let fitCalls = 0;
+	beforeEach(() => {
+		fitCalls = 0;
+		proto.fitWorld = function (this: unknown) { fitCalls++; return realFit.call(this); };
+	});
+	afterEach(() => { proto.fitWorld = realFit; });
+	const keydown = async (key: string) => {
+		const e = new dom.window.Event("keydown", { bubbles: true });
+		Object.assign(e, { key });
+		await act(async () => { dom.window.dispatchEvent(e); });
+	};
+
+	it("reads the stored camera under a key that names the world", async () => {
+		await mount(snap(model({ worldKey: "gen-1|10|abc" })));
+		assert.ok(storageReads.includes(keyOf("gen-1|10|abc")), storageReads.join(","));
+		assert.ok(!storageReads.includes("lh.forest.camera.v1"), "the world-less key is gone");
+	});
+
+	it("does not hand one world's camera to another", async () => {
+		storage.set(keyOf("w-a"), JSON.stringify({ k: 0.5, x: 1, y: 2 }));
+		await mount(snap(model({ worldKey: "w-b" })));
+		assert.ok(storageReads.includes(keyOf("w-b")));
+		assert.ok(!storageReads.includes(keyOf("w-a")), "world A's camera is never read for world B");
+	});
+
+	it("switches camera key when a refetch brings a different world", async () => {
+		await mount(snap(model({ worldKey: "w-a" })));
+		storageReads = [];
+		snapshot = snap(model({ worldKey: "w-b" }));
+		await act(async () => { dom.window.dispatchEvent(new dom.window.Event("lh:graph-revision")); });
+		for (let i = 0; i < 4; i++) await act(async () => { await Promise.resolve(); });
+		assert.ok(storageReads.includes(keyOf("w-b")), storageReads.join(","));
+	});
+
+	it("never fits a canvas the padding swallows (no mirrored camera), but fits a real one", async () => {
+		const canvasProto = (dom.window as unknown as { HTMLCanvasElement: { prototype: object } }).HTMLCanvasElement.prototype;
+		const size = { w: 60, h: 60 };
+		Object.defineProperty(canvasProto, "clientWidth", { configurable: true, get: () => size.w });
+		Object.defineProperty(canvasProto, "clientHeight", { configurable: true, get: () => size.h });
+		try {
+			const stored = () => [...storage.entries()].filter(([k]) => k.startsWith("lh.forest.camera.v2:"));
+			await mount(snap(model()));
+			await unmount?.();
+			assert.deepEqual(stored(), [], "a 60x60 canvas (padding 40 per side) is not fitted");
+			host?.remove();
+			size.w = 800;
+			size.h = 600;
+			await mount(snap(model()));
+			await unmount?.();
+			const [entry] = stored();
+			assert.ok(entry, "an 800x600 canvas is fitted and its camera persisted");
+			assert.ok((JSON.parse(entry[1]) as { k: number }).k > 0, "the fitted zoom is positive");
+		} finally {
+			delete (canvasProto as Record<string, unknown>).clientWidth;
+			delete (canvasProto as Record<string, unknown>).clientHeight;
+		}
+	});
+
+	it("frames the world from the Fit world button", async () => {
+		const el = await mount(snap(model()));
+		const btn = Array.from(el.querySelectorAll("button")).find((b) => (b.textContent ?? "").trim() === "Fit world");
+		assert.ok(btn, "button exists");
+		const before = fitCalls;
+		await act(async () => { btn.dispatchEvent(new dom.window.Event("click", { bubbles: true })); });
+		assert.equal(fitCalls, before + 1);
+	});
+
+	it("frames the world on f, but not while typing", async () => {
+		const el = await mount(snap(model()));
+		const before = fitCalls;
+		await keydown("f");
+		assert.equal(fitCalls, before + 1, "f fits");
+		await keydown("x");
+		assert.equal(fitCalls, before + 1, "other keys do nothing");
+		const input = document.createElement("textarea");
+		el.append(input);
+		Object.defineProperty(document, "activeElement", { configurable: true, get: () => input });
+		try {
+			await keydown("f");
+			assert.equal(fitCalls, before + 1, "typing in a field does not fit");
+		} finally {
+			delete (document as unknown as Record<string, unknown>).activeElement;
+		}
 	});
 });
 

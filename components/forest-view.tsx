@@ -18,14 +18,17 @@ import { useServerEvent } from "@/components/server-events";
 import { ForestCanvasRenderer, DEFAULT_FOREST_COLORS, type ForestCallbacks, type ForestColors } from "./forest-canvas.ts";
 import { ForestIdeaCard } from "./forest-idea-card.tsx";
 
-const CAMERA_STORAGE_KEY = "lh.forest.camera.v1";
+const CAMERA_STORAGE_PREFIX = "lh.forest.camera.v2";
+/** The camera is stored per world: a different world (a new layout, a
+ *  regeneration) must not open on the previous one's view. */
+const cameraStorageKey = (worldKey: string): string => `${CAMERA_STORAGE_PREFIX}:${worldKey}`;
 const CARD_W = 320;
 const CARD_EST_H = 260;
 
 /** The persisted camera, or null when absent or malformed. */
-function readStoredCamera(): ForestCamera | null {
+function readStoredCamera(worldKey: string): ForestCamera | null {
 	try {
-		const stored = localStorage.getItem(CAMERA_STORAGE_KEY);
+		const stored = localStorage.getItem(cameraStorageKey(worldKey));
 		if (!stored) return null;
 		const p = JSON.parse(stored) as { k?: unknown; x?: unknown; y?: unknown };
 		if (
@@ -63,7 +66,7 @@ function readColors(): { colors: ForestColors; fontFamily: string } {
 
 interface Selected {
 	node: GraphNode;
-	/** Click point in stage pixels; null = pinned bottom-left (uncharted list). */
+	/** Click point in stage pixels; null = pinned top-right (uncharted list). */
 	anchor: { x: number; y: number } | null;
 }
 
@@ -86,14 +89,17 @@ function EmptyState({ needsGenerate }: { needsGenerate: boolean }) {
 				{needsGenerate ? (
 					<>
 						<div className="text-base font-medium text-foreground">The forest has no world yet</div>
-						<div>Build the world, then lay it out:</div>
+						<div>Build the world, merge its duplicate topics, then lay it out:</div>
 						<Step>npm run world:generate</Step>
+						<Step>npm run world:dedupe</Step>
 						<Step>npm run world:layout</Step>
 					</>
 				) : (
 					<>
 						<div className="text-base font-medium text-foreground">The world has no positions yet</div>
-						<div>Lay it out to grow the forest:</div>
+						<div>Merge duplicate topics first if you haven&apos;t yet (layout locks positions in):</div>
+						<Step>npm run world:dedupe</Step>
+						<div>Then lay it out to grow the forest:</div>
 						<Step>npm run world:layout</Step>
 					</>
 				)}
@@ -166,6 +172,7 @@ export function ForestView() {
 
 	const model = snapshot?.model ?? null;
 	const hasForest = model !== null && model.topics.length > 0;
+	const worldKey = model?.worldKey ?? "";
 	const names = useMemo(
 		() => new Map((snapshot?.graph.propositions ?? []).map((n) => [n.id, n.name])),
 		[snapshot],
@@ -176,13 +183,14 @@ export function ForestView() {
 		if (!hasForest) return;
 		const canvas = canvasRef.current;
 		if (!canvas) return;
-		const initial = readStoredCamera();
+		const storageKey = cameraStorageKey(worldKey);
+		const initial = readStoredCamera(worldKey);
 		needsFitRef.current = initial === null;
 		let timer: ReturnType<typeof setTimeout> | null = null;
 		let last: ForestCamera | null = null;
 		const write = (cam: ForestCamera) => {
 			try {
-				localStorage.setItem(CAMERA_STORAGE_KEY, JSON.stringify(cam));
+				localStorage.setItem(storageKey, JSON.stringify(cam));
 			} catch {
 				// Camera persistence is best-effort.
 			}
@@ -227,7 +235,7 @@ export function ForestView() {
 			}
 			renderer.destroy();
 		};
-	}, [hasForest]);
+	}, [hasForest, worldKey]);
 
 	// Feed the renderer after every load. Colours are read once per load.
 	useEffect(() => {
@@ -256,8 +264,26 @@ export function ForestView() {
 		return () => window.removeEventListener("keydown", onKey);
 	}, [selected]);
 
+	// "f" frames the whole forest — unless the user is typing somewhere.
+	useEffect(() => {
+		if (!hasForest) return;
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key !== "f" && e.key !== "F") return;
+			if (e.ctrlKey || e.metaKey || e.altKey) return;
+			const target = e.target as HTMLElement | null;
+			const active = document.activeElement as HTMLElement | null;
+			const typing = (el: HTMLElement | null) =>
+				!!el && (el.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName));
+			if (typing(target) || typing(active)) return;
+			rendererRef.current?.fitWorld();
+		};
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+	}, [hasForest]);
+
 	// ── Render ──
 	const unplaced = model?.unplaced ?? 0;
+	const unpositioned = model?.unpositioned ?? 0;
 	const uncharted = model?.uncharted ?? [];
 
 	const cardStyle = (() => {
@@ -297,20 +323,32 @@ export function ForestView() {
 					</button>
 				</Notice>
 			)}
-			{snapshot && failed && (
-				<div className="pointer-events-none absolute right-3 top-14 z-10 text-xs text-muted-foreground">
-					Couldn&apos;t refresh
-				</div>
-			)}
 
 			{/* One top-left column BELOW the floating header row (h-13 = 52px): the
-			    coverage lines, then the uncharted control (its list drops down). */}
-			{hasForest && model && (
+			    coverage lines (and the stale-data note), Fit world, then the
+			    uncharted control (its list drops down). The pinned idea card owns
+			    the top-right. */}
+			{((hasForest && model) || (snapshot && failed)) && (
 				<div className="pointer-events-none absolute left-3 top-14 z-10 flex max-w-xs flex-col items-start gap-1.5">
 					<div className="flex flex-col gap-0.5 text-xs text-muted-foreground">
-						<div>{`Mapped ${formatCoverage(model.coverage.mapped, model.coverage.total)} of undergrad STEM`}</div>
-						{unplaced > 0 && <div>{`${unplaced} ${unplaced === 1 ? "idea" : "ideas"} waiting to be placed`}</div>}
+						{hasForest && model && (
+							<div>{`Mapped ${formatCoverage(model.coverage.mapped, model.coverage.total)} of undergrad STEM`}</div>
+						)}
+						{hasForest && unplaced > 0 && <div>{`${unplaced} ${unplaced === 1 ? "idea" : "ideas"} waiting to be placed`}</div>}
+						{hasForest && unpositioned > 0 && (
+							<div>{`${unpositioned} ${unpositioned === 1 ? "topic" : "topics"} not laid out yet — npm run world:layout`}</div>
+						)}
+						{snapshot && failed && <div>Couldn&apos;t refresh</div>}
 					</div>
+					{hasForest && !canvasBroken && (
+						<button
+							type="button"
+							onClick={() => rendererRef.current?.fitWorld()}
+							className="lh-no-drag pointer-events-auto rounded-full border bg-card/85 px-3 py-1.5 text-xs text-muted-foreground shadow-lg backdrop-blur transition-colors hover:text-foreground"
+						>
+							Fit world
+						</button>
+					)}
 					{uncharted.length > 0 && (
 						<div className="lh-no-drag pointer-events-auto flex w-full flex-col items-start gap-1">
 							<button

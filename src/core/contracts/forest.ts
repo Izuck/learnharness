@@ -59,6 +59,10 @@ export interface ForestTrail {
 }
 
 export interface ForestModel {
+	/** Stable identity of the laid-out world (generation time, topic count and
+	 *  a hash of the positions): anything keyed to a world, like the stored
+	 *  camera, uses it so a different world never inherits a stale view. */
+	worldKey: string;
 	/** Positioned topics only, in world order. */
 	topics: ForestTopic[];
 	regions: ForestRegion[];

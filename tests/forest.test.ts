@@ -28,6 +28,8 @@ import {
 	visibleTopics,
 } from "../src/core/forest.ts";
 import type { ForestTopic } from "../src/core/contracts/forest.ts";
+import type { TopicMerges } from "../src/core/contracts/world.ts";
+import { aliasMap, mergePlacements, repointPlacements } from "../src/core/world.ts";
 
 const topic = (
 	id: string,
@@ -525,5 +527,53 @@ describe("forest geometry: layoutClearing", () => {
 
 	it("returns an empty map for no ideas", () => {
 		assert.equal(layoutClearing([], [], center, 160).size, 0);
+	});
+});
+
+describe("forest: dedupe seam", () => {
+	// The dedupe step merges "t-old" into "t-new" in the rebuilt world and appends
+	// repoint lines to the placements ledger. Between the two, a placement to the
+	// merged-away id points at a topic the world no longer has.
+	const merges: TopicMerges = {
+		version: 1,
+		decisions: {
+			"t-new|t-old": { same: true, canonical: "T-NEW", reason: "same", decidedAt: "2026-11-02T00:00:00.000Z" },
+		},
+	};
+	const merged: WorldFile = {
+		...world,
+		topics: [topic("t-new", ["math"], { x: 5, y: 5 }), topic("t1", ["math"], { x: 0, y: 0 })],
+	};
+	const graph = { propositions: nodes("n1"), chains: [] as GraphChain[] };
+
+	it("keeps a placement to a merged-away topic uncharted until the repoint line lands, then lights the canonical", () => {
+		const ledger = [place("n1", "t-old")];
+		const before = buildForest(merged, ledger, graph);
+		assert.deepEqual(before.uncharted, ["n1"]);
+		assert.equal(before.topics.find((t) => t.id === "t-new")?.glow, 0);
+		assert.equal(before.coverage.mapped, 0);
+
+		const aliases = aliasMap(merges, new Set(["t-old", "t-new"]));
+		const latest = mergePlacements(ledger, new Set(["n1"]));
+		const repoints = repointPlacements(latest, aliases, "2026-11-02T02:00:00.000Z");
+		assert.deepEqual(repoints, [{ nodeId: "n1", topicId: "t-new", placedAt: "2026-11-02T02:00:00.000Z" }]);
+
+		const after = buildForest(merged, [...ledger, ...repoints], graph);
+		assert.deepEqual(after.uncharted, []);
+		const canonical = after.topics.find((t) => t.id === "t-new")!;
+		assert.deepEqual(canonical.ideas, ["n1"]);
+		assert.ok(canonical.glow > 0);
+		assert.equal(after.coverage.mapped, 1);
+	});
+});
+
+describe("forest: worldKey", () => {
+	it("is stable for the same world and changes when the world or its layout does", () => {
+		const key = (w: WorldFile) => buildForest(w, [], empty).worldKey;
+		assert.equal(key(world), key({ ...world }));
+		assert.notEqual(key(world), key({ ...world, generatedAt: "2026-11-03T00:00:00.000Z" }));
+		assert.notEqual(key(world), key({ ...world, topics: [...world.topics, topic("t9", ["math"], { x: 1, y: 1 })] }));
+		const moved = world.topics.map((t, i) => (i === 0 ? { ...t, position: { x: 500, y: 500 } } : t));
+		assert.notEqual(key(world), key({ ...world, topics: moved }));
 	});
 });

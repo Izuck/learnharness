@@ -286,7 +286,7 @@ export class ForestCanvasRenderer {
 		if (!this.bbox) return;
 		const w = this.canvas.clientWidth;
 		const h = this.canvas.clientHeight;
-		if (!(w >= 10 && h >= 10)) return; // also rejects NaN
+		if (!(w > 2 * FIT_PADDING && h > 2 * FIT_PADDING)) return; // a canvas the padding swallows would fit to a negative k; also rejects NaN
 		const t = fitTransform(this.bbox, w, h, FIT_PADDING);
 		const k = Math.min(t.k, FIT_K_CAP);
 		this.kFit = k; // the CAPPED fit: the zoom floor must sit below the camera's starting k
@@ -346,7 +346,7 @@ export class ForestCanvasRenderer {
 		if (!this.bbox) return;
 		const w = this.canvas.clientWidth;
 		const h = this.canvas.clientHeight;
-		if (!(w >= 10 && h >= 10)) return; // also rejects NaN
+		if (!(w > 2 * FIT_PADDING && h > 2 * FIT_PADDING)) return; // a canvas the padding swallows would fit to a negative k; also rejects NaN
 		this.kFit = Math.min(fitTransform(this.bbox, w, h, FIT_PADDING).k, FIT_K_CAP);
 		this.updateExtent();
 	}
