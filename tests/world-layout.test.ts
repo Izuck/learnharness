@@ -58,17 +58,17 @@ function fixture(perDegree: number): WorldTopic[] {
 }
 
 describe("world layout", () => {
-	it("declares the eight degrees, each with an anchor", () => {
+	it("declares the twelve degrees, each with an anchor", () => {
 		assert.deepEqual(
 			WORLD_DEGREES.map((d) => d.id),
-			["math", "physics", "ee", "cs", "chemistry", "me", "biology", "earth-space"],
+			["math", "physics", "ee", "cs", "chemistry", "me", "biology", "earth-space", "compe", "civil", "env", "nuclear"],
 		);
 		for (const d of WORLD_DEGREES) assert.ok(DEGREE_ANCHORS[d.id], `anchor for ${d.id}`);
 	});
 
 	it("gives every topic a finite position", () => {
 		const out = layoutWorld(fixture(5), 1);
-		assert.equal(out.length, 40);
+		assert.equal(out.length, WORLD_DEGREES.length * 5);
 		for (const t of out) {
 			const p = pos(t);
 			assert.ok(Number.isFinite(p.x) && Number.isFinite(p.y), t.id);
