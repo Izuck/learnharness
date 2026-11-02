@@ -3,7 +3,7 @@ import {
 	effectiveSettings,
 	getChat,
 	parseSettingsBody,
-	stores,
+	saveChatSettings,
 	validateChatSettings,
 } from "@/src/server";
 import type { ChatSettings } from "@/src/core";
@@ -43,6 +43,7 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
 	// level never rejects — it clamps to the named model's nearest
 	// supported (body model, else the record's strong slot).
 	const settings = clampChatLevel(parsed.settings, effectiveSettings().models.strong);
-	stores.chatStore.saveSettings(id, settings);
+	// Moving the lesson to another model or backend also ends its kept Claude Code process.
+	saveChatSettings(id, settings);
 	return Response.json({ settings });
 }

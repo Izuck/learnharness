@@ -1,5 +1,7 @@
 import { abortExtraction, extractionStatuses } from "../agent/subagents/extraction.ts";
 import { isJobLive } from "../agent/subagents/aborts.ts";
+import { endLiveSession } from "../agent/claude-code/live-processes.ts";
+import type { ChatSettings } from "../core/contracts/chat.ts";
 import { coverageOf } from "../core/coverage.ts";
 import { deleteChatTraces, type ChatDeleteMode, type ChatDeletionStats } from "../core/graph-deletion.ts";
 import { titleFromPrompt } from "../core/contracts.ts";
@@ -24,6 +26,18 @@ import { discardChatDeliveries } from "./jobs.ts";
 export const { createChat, getChat, listChats } = stores.chatStore;
 export { titleFromPrompt };
 export type { ChatDeleteMode, ChatDeletionStats } from "../core/graph-deletion.ts";
+
+/**
+ * The per-chat settings write (the model picker and the lesson's backend switch). A lesson moved
+ * to another model or backend has no use for the Claude Code process it kept: it ends now rather
+ * than lingering until its timeout. The next CLI turn, if any, replays the lesson.
+ */
+export function saveChatSettings(id: string, settings: ChatSettings): void {
+	const before = stores.chatStore.getChat(id)?.settings?.model;
+	stores.chatStore.saveSettings(id, settings);
+	const after = settings.model;
+	if (before?.provider !== after?.provider || before?.id !== after?.id) endLiveSession(id);
+}
 
 /** How long the wind-down wait may take before the caller gets a retryable
  *  503 (an aborted extraction ends at its next model-call boundary —

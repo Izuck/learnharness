@@ -26,12 +26,13 @@ process.env.LH_DATA_DIR = testData;
 after(() => rmSync(testData, { recursive: true, force: true }));
 const { PATHS, SETTINGS_FILE } = await import("../config.ts");
 const { readSettings, writeSettings } = await import("../src/store/settings.ts");
-const { killAllLiveProcesses, LIVE_PROCESS_IDLE_TIMEOUT_MS, liveProcessIdleTimeoutMs } = await import("../src/agent/claude-code/live-processes.ts");
+const { addIdleProcess, killAllLiveProcesses, LIVE_PROCESS_IDLE_TIMEOUT_MS, liveProcessIdleTimeoutMs } = await import("../src/agent/claude-code/live-processes.ts");
 const { CLAUDE_CODE_MODELS } = await import("../src/agent/claude-code/provider.ts");
 const { createClaudeCodeStreamFunction } = await import("../src/agent/claude-code/stream.ts");
 const { createTeacherAgent } = await import("../src/agent/teacher-agent.ts");
 const { cliContextWindowOf, danglingQuestionOf } = await import("../src/core/native-messages.ts");
 const { handleChatRequest } = await import("../src/server/chat-handler.ts");
+const { saveChatSettings } = await import("../src/server/chats.ts");
 const { isTurnRunning } = await import("../src/server/turn-liveness.ts");
 const { runningTurn } = await import("../src/server/turn-runs.ts");
 const { chatStore } = await import("../src/store/chats.ts");
@@ -385,4 +386,23 @@ for (const withThinking of [false, true]) test(`the learner's next message conti
 	assert.ok(users[1]!.includes("go on") && !users[1]!.includes("teach me sockets"), users[1]);
 	killAllLiveProcesses();
 	await waitForExit(fakeRun.children[0]!);
+});
+
+test("moving a lesson to another model or backend ends its kept CLI process; other setting changes keep it", (t) => {
+	t.after(() => killAllLiveProcesses());
+	const chatId = createClaudeCodeChat(t);
+	const killed: string[] = [];
+	const keep = (name: string) => addIdleProcess({ owner: Symbol(name), sessionId: chatId, kill: () => killed.push(name) });
+	keep("kept");
+	saveChatSettings(chatId, { model: { provider: "claude-code", id: "sonnet" }, thinkingLevel: "high" });
+	assert.deepEqual([...killed], [], "the same model keeps the lesson's process");
+	saveChatSettings(chatId, { model: { provider: "anthropic", id: "claude-sonnet-5-5" } });
+	assert.deepEqual([...killed], ["kept"], "moving the lesson to the API ends it");
+	assert.deepEqual(chatStore.getChat(chatId)?.settings?.model, { provider: "anthropic", id: "claude-sonnet-5-5" });
+	keep("on the API");
+	saveChatSettings(chatId, { model: { provider: "claude-code", id: "opus" } });
+	assert.deepEqual([...killed], ["kept", "on the API"]);
+	keep("on opus");
+	saveChatSettings(chatId, {});
+	assert.deepEqual([...killed], ["kept", "on the API", "on opus"], "clearing the override moves the lesson to the default model");
 });
