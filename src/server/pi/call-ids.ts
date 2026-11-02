@@ -30,7 +30,9 @@ import type { AgentEvent } from "@earendil-works/pi-agent-core";
  * table (epoch) opens at each assistant message_start; the update/end
  * objects of that message attach to it; mints claim once per message, so
  * the same id in a SECOND message of the turn (a retry step) gets its own
- * mint. Colliding ids become `${orig}~2`, `~3`, … skipping used ones.
+ * mint. Colliding ids become `${orig}~2`, `~3`, … skipping used ones. A
+ * message_end releases the claims of streamed previews the settled message
+ * no longer carries (see releaseWithdrawn).
  */
 
 /** Structurally walk any message's content for tool-call blocks. */
@@ -140,8 +142,12 @@ export class ToolCallIdUniquifier {
 				return this.remapEventMessage(event);
 			}
 			case "message_update":
-			case "message_end":
 				return this.remapEventMessage(event);
+			case "message_end": {
+				const remapped = this.remapEventMessage(event);
+				this.releaseWithdrawn((event as { message: unknown }).message);
+				return remapped;
+			}
 			case "tool_execution_start":
 			case "tool_execution_update":
 			case "tool_execution_end": {
@@ -169,6 +175,23 @@ export class ToolCallIdUniquifier {
 			}
 			default:
 				return event;
+		}
+	}
+
+	/** A settled message keeps only the ids it still carries. A call that streamed as a preview and
+	 *  was withdrawn before the message settled (the CLI admits a batch one MCP call at a time, so a
+	 *  sibling preview leaves this message and returns in the next) never reached the record: its
+	 *  claim is released so the later message keeps the original id instead of minting `~2`, which
+	 *  would split the record from what the provider (and a waiting CLI process) holds. */
+	private releaseWithdrawn(message: unknown): void {
+		if ((message as { role?: string } | undefined)?.role !== "assistant") return;
+		const table = this.tables.get(message as object) ?? this.epoch;
+		if (!table) return;
+		const carried = new Set(callBlocks(message).map((block) => block.id));
+		for (const [orig, mapped] of [...table]) {
+			if (carried.has(orig)) continue;
+			table.delete(orig);
+			this.seen.delete(mapped);
 		}
 	}
 

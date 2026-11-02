@@ -260,6 +260,36 @@ test("a question pauses later calls from the same CLI response until the learner
 	await waitForExit(fakeRun.children[0]!);
 });
 
+test("a send_to_user + question batch admitted one MCP call at a time keeps the question's id, so the answer continues the same process", async (t) => {
+	// The common lesson step: teach, then ask. The question streams as a preview beside
+	// send_to_user, is withdrawn when send_to_user alone is admitted, and comes back in the
+	// next message; the record must keep the id the waiting process holds.
+	const sendId = "toolu_harness_send";
+	const sendInput = { message: "Sockets are endpoints." };
+	const scenario = [
+		streamEvent({ type: "message_start", message: { usage: {} } }),
+		streamEvent({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: sendId, name: "mcp__learnharness__send_to_user", input: {} } }),
+		streamEvent({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: JSON.stringify(sendInput) } }),
+		streamEvent({ type: "content_block_stop", index: 0 }),
+		...toAskScenario().slice(1, 4).map((line) => line.replaceAll('"index":0', '"index":1')),
+		...toAskScenario().slice(4, 6),
+		JSON.stringify({ fake: "call", id: sendId, name: "send_to_user", arguments: sendInput }),
+		JSON.stringify({ fake: "call", id: ASK_ID, name: "ask_user_question", arguments: ASK_INPUT }),
+		JSON.stringify({ fake: "reply" }),
+	];
+	const fakeRun = createFakeRun(t, [scenario]);
+	const factory = createAgentFactory(fakeRun);
+	const chatId = createClaudeCodeChat(t);
+	await runChatTurn(chatId, { type: "text", text: "teach me sockets" }, factory);
+	assert.equal(danglingQuestionOf(chatStore.getChat(chatId)?.messages ?? [])?.toolCallId, ASK_ID);
+	assert.equal(JSON.stringify(chatStore.getChat(chatId)?.messages).includes(`${ASK_ID}~`), false, "the question's id must not remint");
+	await runChatTurn(chatId, toAnswerInput(), factory);
+	assert.equal(fakeRun.children.length, 1, "the answer must continue the waiting process, not replay the lesson");
+	assert.ok(getLastAssistantText(chatId).includes(ANSWER_TEXT), getLastAssistantText(chatId));
+	killAllLiveProcesses(); // The finished turn kept its process idle for the next message.
+	await waitForExit(fakeRun.children[0]!);
+});
+
 test("an individually cancelled MCP question queued behind a learner wait never executes", async (t) => {
 	const cancelledId = "toolu_cancelled_question";
 	const question = "This cancelled question must never be posed";

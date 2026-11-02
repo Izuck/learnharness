@@ -123,6 +123,39 @@ describe("ToolCallIdUniquifier", () => {
 		assert.equal(e.toolResults[0]!.toolCallId, "call_0~2");
 	});
 
+	it("a preview withdrawn before its message settled keeps its id when a later message admits it", () => {
+		// The CLI admits a [send_to_user, question] batch one MCP call at a time: the question streams
+		// as a preview in message 1, is withdrawn when send_to_user alone settles it, and comes back in
+		// message 2. Its id must not remint, or the record and the waiting CLI process disagree.
+		const u = new ToolCallIdUniquifier([]);
+		const S = { type: "toolCall", id: "toolu_S", name: "send_to_user", arguments: {} };
+		const Q = { type: "toolCall", id: "toolu_Q", name: "ask_user_question", arguments: {} };
+		const m1: any = { id: "m1", role: "assistant", content: [] };
+		u.event(asEvent({ type: "message_start", message: m1 }));
+		const preview = u.event(asEvent({ type: "message_update", message: { ...m1, content: [S, Q] } }));
+		assert.deepEqual((preview as any).message.content.map((b: { id: string }) => b.id), ["toolu_S", "toolu_Q"]);
+		m1.content = [S];
+		u.event(asEvent({ type: "message_end", message: m1 }));
+		const m2: any = { id: "m2", role: "assistant", content: [] };
+		u.event(asEvent({ type: "message_start", message: m2 }));
+		m2.content = [Q];
+		assert.equal(firstCallId(u.event(asEvent({ type: "message_end", message: m2 }))), "toolu_Q");
+		const settled = u.remapSettled([m1, toolResultMsg("toolu_S"), m2, toolResultMsg("toolu_Q")]) as any[];
+		assert.equal(settled[2].content[0].id, "toolu_Q");
+		assert.equal(settled[3].toolCallId, "toolu_Q");
+	});
+
+	it("an id the settled message still carries stays claimed: a later message's copy still remints", () => {
+		const u = new ToolCallIdUniquifier([]);
+		const m1 = assistantMsg("m1", ["call_0"]);
+		u.event(asEvent({ type: "message_start", message: m1 }));
+		u.event(asEvent({ type: "message_update", message: { ...m1, content: [...m1.content, { type: "toolCall", id: "call_1", name: "quiz", arguments: {} }] } }));
+		u.event(asEvent({ type: "message_end", message: m1 }));
+		const m2 = assistantMsg("m2", ["call_0"]);
+		u.event(asEvent({ type: "message_start", message: m2 }));
+		assert.equal(firstCallId(u.event(asEvent({ type: "message_end", message: m2 }))), "call_0~2");
+	});
+
 	it("non-message events pass through untouched", () => {
 		const u = new ToolCallIdUniquifier([]);
 		assert.deepEqual(u.event({ type: "agent_start" }), { type: "agent_start" });
