@@ -112,6 +112,20 @@ describe("world layout", () => {
 		}
 	});
 
+	it("uses custom anchors instead of the hand-drawn ones", () => {
+		const custom: Record<string, WorldPosition> = { ...DEGREE_ANCHORS, math: { x: 90000, y: 60000 } };
+		const out = layoutWorld(fixture(6), 1, custom);
+		const own = out.filter((t) => t.degrees.length === 1 && t.degrees[0] === "math");
+		const mean = {
+			x: own.reduce((s, t) => s + pos(t).x, 0) / own.length,
+			y: own.reduce((s, t) => s + pos(t).y, 0) / own.length,
+		};
+		const nearest = Object.entries(custom).sort((a, b) => dist(mean, a[1]) - dist(mean, b[1]))[0]![0];
+		assert.equal(nearest, "math");
+		assert.ok(dist(mean, custom.math!) < dist(mean, DEGREE_ANCHORS.math!));
+		assert.deepEqual(layoutWorld(fixture(6), 1, DEGREE_ANCHORS), layoutWorld(fixture(6), 1));
+	});
+
 	it("places shared topics between their degrees", () => {
 		const t = [...fixture(4), topic("shared", ["math", "physics"])];
 		const shared = pos(layoutWorld(t, 1).find((x) => x.id === "shared")!);

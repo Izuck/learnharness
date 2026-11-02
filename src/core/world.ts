@@ -115,6 +115,10 @@ export function isWorldFile(v: unknown): v is WorldFile {
 	if (v.version !== 1 || !isStr(v.generatedAt)) return false;
 	if (!Array.isArray(v.degrees) || !Array.isArray(v.topics)) return false;
 	if (!v.degrees.every((d) => isObj(d) && isStr(d.id) && isStr(d.name))) return false;
+	if (v.anchors !== undefined) {
+		if (!isObj(v.anchors)) return false;
+		if (!Object.values(v.anchors).every((p) => isObj(p) && Number.isFinite(p.x) && Number.isFinite(p.y))) return false;
+	}
 	return v.topics.every(isWorldTopic);
 }
 

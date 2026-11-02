@@ -84,6 +84,7 @@ Isaac (an engineering student at Georgia Tech) wants to learn STEM properly befo
 - Computed once and saved with the topics.
 - Degrees are large regions. Topics that share courses and prerequisites cluster, and topics shared between degrees sit between their regions.
 - Distances should read as "how far apart these are in an undergrad's studies".
+- Degree anchors are derived from the generated topics, not only hand-placed: at the first layout, the overlap of every pair of degrees (a topic shared by k degrees weighs 1/(k−1)) becomes a distance, classical MDS embeds it, and the result is aligned (scale, rotation or reflection, shift) to the hand-drawn map so the approved orientation holds. The anchors are stored in `topics.json` and reused afterwards; degrees with too little data keep their hand-drawn anchor. The layout script reports the 2D and 3D stress of the embedding, which decides whether the map ever needs a third dimension.
 - After the first save, positions never change. A topic added later is placed into empty space near its prerequisites.
 
 **Placing ideas.**

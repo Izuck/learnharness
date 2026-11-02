@@ -251,13 +251,17 @@ async function main(): Promise<void> {
 	const merged = mergeDegreeTopics(batches);
 	const { unresolvedPrereqs } = merged;
 	// A rerun must not wipe positions a previous layout saved.
-	const topics = carryPositions(merged.topics, worldStore.readWorld());
+	const prev = worldStore.readWorld();
+	const topics = carryPositions(merged.topics, prev);
 	const present = WORLD_DEGREES.filter((d) => batches.some((b) => b.degree === d.id));
 	worldStore.writeWorld({
 		version: 1,
 		generatedAt: new Date().toISOString(),
 		degrees: [...present],
 		topics,
+		// Stored anchors go with the saved positions: dropping them would let the
+		// next layout re-derive anchors the pinned topics no longer match.
+		...(prev?.anchors ? { anchors: prev.anchors } : {}),
 	});
 	fs.writeFileSync(WORLD_FILES.report, renderReport([...present], batches, topics.length, unresolvedPrereqs), "utf-8");
 	log(`Wrote ${topics.length} topics to ${WORLD_FILES.topics} and ${WORLD_FILES.report}`);

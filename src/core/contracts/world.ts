@@ -43,6 +43,10 @@ export interface WorldFile {
 	generatedAt: string;
 	degrees: WorldDegree[];
 	topics: WorldTopic[];
+	/** Degree anchors the layout used, derived once from topic overlap at first
+	 *  layout; reused afterwards so topics added later anchor consistently and
+	 *  pinned positions stay coherent. */
+	anchors?: Record<string, WorldPosition>;
 }
 
 /** The generator's output for ONE course of ONE degree — the unit that is

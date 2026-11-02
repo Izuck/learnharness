@@ -140,6 +140,19 @@ describe("world: guards", () => {
 		assert.equal(isWorldFile(null), false);
 		assert.equal(isWorldFile({ ...ok, topics: [{ id: "a" }] }), false);
 	});
+	it("isWorldFile accepts optional anchors and rejects malformed ones", () => {
+		const ok = {
+			version: 1,
+			generatedAt: "2026-10-30T00:00:00.000Z",
+			degrees: [{ id: "math", name: "Mathematics" }],
+			topics: [],
+		};
+		assert.equal(isWorldFile({ ...ok, anchors: { math: { x: 1, y: 2 } } }), true);
+		assert.equal(isWorldFile({ ...ok, anchors: {} }), true);
+		assert.equal(isWorldFile({ ...ok, anchors: { math: { x: 1 } } }), false);
+		assert.equal(isWorldFile({ ...ok, anchors: { math: { x: 1, y: Number.NaN } } }), false);
+		assert.equal(isWorldFile({ ...ok, anchors: [] }), false);
+	});
 });
 
 describe("world: placements", () => {

@@ -41,8 +41,12 @@ export const WORLD_DEGREES: readonly WorldDegree[] = [
 	{ id: "bme", name: "Biomedical Engineering" },
 ];
 
-/** Degree anchors in world units (the approved mockup, ×100). The connecting
- *  engineering degrees sit between the fields they draw on: compe between ee
+/** The hand-drawn degree anchors in world units (the approved mockup, ×100).
+ *  They are the FALLBACK for degrees with too little data and the orientation
+ *  and scale target that deriveDegreeAnchors (world-anchors.ts) aligns its
+ *  data-derived anchors to; the anchors stored in topics.json (derived from
+ *  topic overlap at first layout) are what the layout really uses. The
+ *  connecting engineering degrees sit between the fields they draw on: compe between ee
  *  and cs, civil beside me, env between earth-space, me and civil, nuclear
  *  beside physics toward chemistry, matsci between physics, chemistry and ee,
  *  bme between biology and ee. Their shared topics land between degrees on
@@ -145,9 +149,10 @@ function forceCourses(groups: number[][], strength: number) {
 
 /** Mean of the anchors of a topic's degrees; unknown degrees are ignored,
  *  and a topic with no known degree falls back to the centroid of all anchors. */
-function anchorOf(degrees: readonly string[]): WorldPosition {
-	const known = degrees.map((d) => DEGREE_ANCHORS[d]).filter((a): a is WorldPosition => a !== undefined);
-	const list = known.length > 0 ? known : Object.values(DEGREE_ANCHORS);
+function anchorOf(degrees: readonly string[], anchors: Readonly<Record<string, WorldPosition>>): WorldPosition {
+	const known = degrees.map((d) => anchors[d]).filter((a): a is WorldPosition => a !== undefined);
+	const list = known.length > 0 ? known : Object.values(anchors);
+	if (list.length === 0) return { x: 0, y: 0 };
 	return {
 		x: list.reduce((s, a) => s + a.x, 0) / list.length,
 		y: list.reduce((s, a) => s + a.y, 0) / list.length,
@@ -157,11 +162,16 @@ function anchorOf(degrees: readonly string[]): WorldPosition {
 /**
  * Lay out the world. Returns the same topics (in order), each with a
  * `position`; a topic that already had one keeps it exactly. The input is
- * not mutated.
+ * not mutated. `anchors` are the degree anchors to use (default: the hand-drawn
+ * DEGREE_ANCHORS).
  */
-export function layoutWorld(topics: WorldTopic[], seed: number): WorldTopic[] {
+export function layoutWorld(
+	topics: WorldTopic[],
+	seed: number,
+	anchors: Readonly<Record<string, WorldPosition>> = DEGREE_ANCHORS,
+): WorldTopic[] {
 	const nodes: SimNode[] = topics.map((t) => {
-		const a = anchorOf(t.degrees);
+		const a = anchorOf(t.degrees, anchors);
 		const rand = lcg(hashString(t.id) ^ (seed >>> 0));
 		const node: SimNode = {
 			id: t.id,
