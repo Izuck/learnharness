@@ -1828,7 +1828,7 @@ describe("stale-job recovery sweep (liveness-gated)", () => {
 		setJobRespawn((id) => {
 			respawnedIds.push(id);
 		});
-		const distinctChats = new Set(realListAllJobs.call(jobStore).map((j) => j.chatId)).size;
+		const distinctChats = new Set((realListAllJobs.call(jobStore) as Array<{ chatId: string }>).map((j) => j.chatId)).size;
 		try {
 			resetSweepThrottle();
 			recoverStaleJobs();
