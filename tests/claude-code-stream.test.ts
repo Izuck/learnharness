@@ -1105,7 +1105,8 @@ for (const extraEnv of [{ FAKE_CLAUDE_INIT: "error" }, { FAKE_CLAUDE_WINDOW: "-1
 	assert(!("cliContextWindow" in (result.type === "done" ? result.message : {})));
 });
 
-for (const sharedIdentity of [false, true]) test(`two concurrent stream owners keep separate processes${sharedIdentity ? " even with identical call IDs and arguments" : ""}`, async (t) => {
+// A process belongs to one lesson (session ID); two lessons run concurrently, here on separate owners.
+for (const sharedIdentity of [false, true]) test(`two concurrent lessons on separate stream owners keep separate processes${sharedIdentity ? " even with identical call IDs and arguments" : ""}`, async (t) => {
 	const readOne: ToolUse = { id: "toolu_concurrent_one", name: "read", arguments: { path: "one" } };
 	const readTwo: ToolUse = sharedIdentity ? { ...readOne } : { id: "toolu_concurrent_two", name: "read", arguments: { path: "two" } };
 	const one = createFakeRun(t, [...toToolUseMessage([readOne]), callTool(readOne), REPLY]);
@@ -1113,15 +1114,32 @@ for (const sharedIdentity of [false, true]) test(`two concurrent stream owners k
 
 	const streamOne = createClaudeCodeStreamFunction(one.runClaude);
 	const streamTwo = createClaudeCodeStreamFunction(two.runClaude);
-	const [toolMessageOne, toolMessageTwo] = await Promise.all([runTurn(streamOne, [HI]), runTurn(streamTwo, [HI])]);
+	const lessonOne = { sessionId: "lesson-one" };
+	const lessonTwo = { sessionId: "lesson-two" };
+	const [toolMessageOne, toolMessageTwo] = await Promise.all([runTurn(streamOne, [HI], lessonOne), runTurn(streamTwo, [HI], lessonTwo)]);
 
 	const [replyOne, replyTwo] = await Promise.all([
-		runTurn(streamOne, [HI, toolMessageOne, toToolResult(readOne, "from one")]),
-		runTurn(streamTwo, [HI, toolMessageTwo, toToolResult(readTwo, "from two")]),
+		runTurn(streamOne, [HI, toolMessageOne, toToolResult(readOne, "from one")], lessonOne),
+		runTurn(streamTwo, [HI, toolMessageTwo, toToolResult(readTwo, "from two")], lessonTwo),
 	]);
 
 	assert.equal(getText(replyOne), "from one");
 	assert.equal(getText(replyTwo), "from two");
 	assert.equal(one.calls.length, 1);
 	assert.equal(two.calls.length, 1);
+});
+
+test("another stream owner (a reloaded module copy) never continues a lesson's waiting process, even with the same session and call IDs: it replays, and its process supersedes the old one", async (t) => {
+	const read: ToolUse = { id: "toolu_owner_read", name: "read", arguments: { path: "one" } };
+	const one = createFakeRun(t, [...toToolUseMessage([read]), callTool(read), REPLY]);
+	const two = createFakeRun(t, readFixtureLines("text.jsonl"));
+	const toolMessage = await runTurn(createClaudeCodeStreamFunction(one.runClaude), [HI]);
+	const waiting = one.calls[0]!.child;
+	assert.equal(waiting.exitCode, null, "the first owner's process waits on its held call");
+
+	const reply = await runTurn(createClaudeCodeStreamFunction(two.runClaude), [HI, toolMessage, toToolResult(read, "from two")]);
+	assert.equal(getText(reply), "hello there");
+	assert.equal(two.calls.length, 1, "the other owner replays on its own process");
+	await waitForExit(waiting);
+	killAllLiveProcesses();
 });
