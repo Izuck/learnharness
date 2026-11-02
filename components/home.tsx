@@ -262,7 +262,10 @@ export function Home({
 					    shows the pick HINT so the affordance is discoverable;
 					    teaching mode with nothing picked renders nothing. */}
 					<ComposerActions
-						picker={(practiceProps.length > 0 || mode === "practice") && (
+						/* The forest takes no picks (ForestView has no chain-select), so
+						    the chip would do nothing there — it shows on the graph
+						    canvas and on the MinimalHome (rendering off) only. */
+						picker={!(rendering && view === "forest") && (practiceProps.length > 0 || mode === "practice") && (
 							<NodePickerControl
 								count={practiceProps.length}
 								onOpen={() => setChainSelectOpen(true)}

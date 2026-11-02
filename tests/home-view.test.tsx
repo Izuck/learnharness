@@ -88,7 +88,7 @@ describe("keyboard: forest and graph jumps", () => {
 	it("no two actions share a binding", () => {
 		const seen = new Map<string, string>();
 		for (const a of KEYBOARD_ACTIONS) {
-			if (a.displayOnly || a.binding in seen) continue;
+			if (a.displayOnly) continue;
 			assert.ok(!seen.has(a.binding), `${a.id} duplicates ${seen.get(a.binding)}`);
 			seen.set(a.binding, a.id);
 		}
