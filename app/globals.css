@@ -65,6 +65,15 @@
 	--lh-prose-leading: 1.5;
 	/* Markdown heading weight (appearance settings; 900 = the Black cut). */
 	--lh-heading-weight: 900;
+	/* The forest (fog-of-war home): canvas colours, read once per data load
+	   by components/forest-view.tsx and handed to the renderer as strings. */
+	--lh-forest-bg: #0e1511;
+	--lh-forest-tree: #1d2b22;
+	--lh-forest-tree-edge: #2a3d30;
+	--lh-forest-light: #e8b85a;
+	--lh-forest-trail: #b89a5e;
+	--lh-forest-label: #9fb3a5;
+	--lh-forest-fog-label: #4d5f53;
 }
 
 /* The app is always dark (<html class="dark">); mirror the same values so
@@ -100,6 +109,15 @@
 	--lh-prose-leading: 1.5;
 	/* Markdown heading weight (appearance settings; 900 = the Black cut). */
 	--lh-heading-weight: 900;
+	/* The forest (fog-of-war home): canvas colours, read once per data load
+	   by components/forest-view.tsx and handed to the renderer as strings. */
+	--lh-forest-bg: #0e1511;
+	--lh-forest-tree: #1d2b22;
+	--lh-forest-tree-edge: #2a3d30;
+	--lh-forest-light: #e8b85a;
+	--lh-forest-trail: #b89a5e;
+	--lh-forest-label: #9fb3a5;
+	--lh-forest-fog-label: #4d5f53;
 }
 
 /* CMU Serif bold (titles) — bundled local file, no CDN dependency. */
