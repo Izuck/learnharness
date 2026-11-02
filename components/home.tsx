@@ -3,7 +3,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CornerDownLeftIcon, DumbbellIcon } from "lucide-react";
+import Link from "next/link";
 import { GraphView } from "@/components/graph-view";
+import { ForestView } from "@/components/forest-view";
+import { ButtonGroup } from "@/components/ui/button-group";
+import { Button } from "@/components/ui/button";
 import { MinimalHome } from "@/components/minimal-home";
 import { SetupDialog } from "@/components/setup-dialog";
 import { ComposerActions, NodePickerControl } from "@/components/composer-actions";
@@ -17,8 +21,34 @@ import { PathInput } from "@/components/path-input";
 import { SessionStarter } from "@/components/start-session";
 import type { TurnUsage } from "@/src/core";
 
+/** The Forest | Graph switch: a segmented control of two links, "/" and
+ * "/graph". The current view is marked aria-current="page". */
+function ViewSwitch({ view }: { view: "forest" | "graph" }) {
+	const entries = [
+		{ id: "forest", label: "Forest", href: "/" },
+		{ id: "graph", label: "Graph", href: "/graph" },
+	] as const;
+	return (
+		<ButtonGroup data-testid="home-view-switch" aria-label="Home view" className="lh-no-drag">
+			{entries.map((e) => (
+				<Button
+					key={e.id}
+					asChild
+					variant={view === e.id ? "secondary" : "outline"}
+					size="sm"
+				>
+					<Link href={e.href} aria-current={view === e.id ? "page" : undefined}>
+						{e.label}
+					</Link>
+				</Button>
+			))}
+		</ButtonGroup>
+	);
+}
+
 /**
- * Home — the knowledge graph is the main view, full-bleed edge to edge
+ * Home — the forest is the main view at "/", the knowledge graph at "/graph"
+ * (the view prop); either runs full-bleed edge to edge
  * (owner, graph-view round 1): the canvas owns the whole column, running
  * under the header and the new-session dock, both of which float over it
  * with no gradient scrims. Sessions live in the toggleable sidebar.
@@ -26,12 +56,16 @@ import type { TurnUsage } from "@/src/core";
 export function Home({
 	initialConfigured,
 	rendering = true,
+	view = "forest",
 }: {
 	initialConfigured: boolean;
 	/** GRAPH RENDERING off (owner, 2026-10-06): the home's main view is
 	 * the chains view, not the canvas. Read server-side per navigation —
 	 * changing the setting applies on the next visit home. */
 	rendering?: boolean;
+	/** Which main view: "forest" (the home, default) or "graph" (/graph).
+	 * With rendering OFF both show the MinimalHome. */
+	view?: "forest" | "graph";
 }) {
 	const router = useRouter();
 	const [topic, setTopic] = useState("");
@@ -177,7 +211,9 @@ export function Home({
 			    chrome's survivors; data, extraction, and the pick flow are
 			    untouched, and the chain table stays behind its button. */}
 			<main className="absolute inset-0">
-				{rendering ? (
+				{rendering && view === "forest" ? (
+					<ForestView />
+				) : rendering ? (
 					<GraphView
 						chainSelectOpen={chainSelectOpen}
 						practiceSelection={pickedIds}
@@ -203,6 +239,13 @@ export function Home({
 				<div className="pointer-events-auto">
 					<SidebarToggle />
 				</div>
+				{/* Rendering off: both routes show the MinimalHome, so the
+				    switch would change nothing — it stays hidden. */}
+				{rendering && (
+					<div className="pointer-events-auto">
+						<ViewSwitch view={view} />
+					</div>
+				)}
 			</header>
 
 			{/* New session — same floating blob as the chat composer, docked

@@ -26,6 +26,7 @@ export type KeyAction =
 	| "toggle-sidebar"
 	| "sessions-search"
 	| "jump-graph"
+	| "jump-forest"
 	| "new-session"
 	| "rename-session"
 	| "cheat-sheet"
@@ -66,6 +67,7 @@ export const KEYBOARD_ACTIONS: readonly KeyActionDef[] = [
 	// walk the filtered list, Enter opens (first match when nothing
 	// walked) — see sidebar.tsx's search input.)
 	{ id: "jump-graph", label: "Graph view", scope: "global", binding: "mod+g" },
+	{ id: "jump-forest", label: "Forest view", scope: "global", binding: "mod+shift+g" },
 	{ id: "new-session", label: "New session", scope: "global", binding: "mod+n" },
 	{ id: "rename-session", label: "Rename session", scope: "chat", binding: "f2" },
 	{ id: "toggle-user-thinking", label: "Toggle all your thinking", scope: "chat", binding: "mod+t" },

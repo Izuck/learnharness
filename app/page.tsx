@@ -17,6 +17,6 @@ export default function HomePage() {
 	// section / absent key → factory default on); re-read per navigation.
 	const rendering = resolveSettings(record ?? null).graph.rendering;
 	return (
-		<Home initialConfigured={slotsConfigured(record?.models)} rendering={rendering} />
+		<Home initialConfigured={slotsConfigured(record?.models)} rendering={rendering} view="forest" />
 	);
 }

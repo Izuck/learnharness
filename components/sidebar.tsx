@@ -664,11 +664,11 @@ function SessionsSidebar() {
 					    same size-9 chip geometry, same hover:bg-accent treatment. */}
 					<Hint
 						// Kept (owner, subtlety round 2026-09-25) but to the RIGHT
-						// of the logo, carrying its real shortcut: ⌘G jumps to
-						// the graph view (keyboard-shortcuts routes it to "/",
-						// the same destination as this logo).
+						// of the logo, carrying its real shortcut: ⇧⌘G jumps to
+						// the forest (keyboard-shortcuts routes it to "/", the
+						// same destination as this logo; ⌘G is the graph).
 						label="Home"
-						action="jump-graph"
+						action="jump-forest"
 						side="right"
 					>
 						<Link
