@@ -31,7 +31,7 @@ Isaac (an engineering student at Georgia Tech) wants to learn STEM properly befo
 - XP for time spent or lessons sat through. If levels can be earned without recall, the reward is fake.
 - A forest that rearranges itself. A topic never moves once placed.
 - Application-flavoured nodes. The graph holds general knowledge ("RBF interpolation", not "RBF interpolation for Poisson"), so the world stays finite.
-- Touching the API. Every model call goes through the Claude Code CLI signed in with Isaac's plan.
+- Touching the API unasked. The API is used only when Isaac picks it (§11). Claude Code (CLI) usage, signed in with his plan, never touches API credits.
 
 ## 3. Constraints
 

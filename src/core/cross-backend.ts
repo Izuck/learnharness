@@ -1,10 +1,11 @@
 /**
  * CROSS-BACKEND HISTORY (forest spec H): the app reaches Claude through two backends - the Claude
  * Code CLI (provider `claude-code`, which drops thinking signatures) and the Anthropic API
- * (provider `anthropic`, signed thinking). A lesson can move between them mid-way, and unsigned
- * thinking sent to the API is turned into plain assistant text (or flattened into the CLI's
- * text replay), so the model would read its own old reasoning as something it said aloud.
- * This drops thinking the target backend did not produce. Pure and browser-safe; the one call
+ * (provider `anthropic`, signed thinking). A lesson can move between them mid-way. Whatever the
+ * layers below do with another backend's thinking today (pi-ai's message transform and the CLI's
+ * transcript replay both happen to drop it), the guarantee lives here, independent of their
+ * versions: thinking the target backend did not produce never reaches it, so the model can never
+ * read its own old reasoning as something it said aloud. Pure and browser-safe; the one call
  * site is the engine's stream function (src/agent/models.ts), which every agent runs on.
  */
 
