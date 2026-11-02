@@ -14,7 +14,20 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { GraphChain, GraphNode } from "../src/core/contracts/graph.ts";
 import type { Placement, WorldFile, WorldTopic } from "../src/core/contracts/world.ts";
-import { buildForest, formatCoverage, topicGlow } from "../src/core/forest.ts";
+import {
+	buildForest,
+	CLEARING_K,
+	CLEARING_R,
+	forestLevel,
+	formatCoverage,
+	LABEL_BUDGET,
+	layoutClearing,
+	pickLabels,
+	REGION_K,
+	topicGlow,
+	visibleTopics,
+} from "../src/core/forest.ts";
+import type { ForestTopic } from "../src/core/contracts/forest.ts";
 
 const topic = (
 	id: string,
@@ -316,5 +329,147 @@ describe("forest: topicGlow", () => {
 		const h = topicGlow({ seen: 0, held: 1, fast: 0 });
 		const f = topicGlow({ seen: 0, held: 0, fast: 1 });
 		assert.ok(s < h && h < f);
+	});
+});
+
+// FOREST GEOMETRY — pinned behaviors:
+// 1. LEVEL: world below REGION_K, region up to CLEARING_K, clearing from it.
+// 2. CULLING: screen = world*k + (x,y); keep what falls in the viewport grown by padPx.
+// 3. LABELS: at most `budget`; lit before fogged, brighter first, then name, then id; no mutation.
+// 4. CLEARING: ideas laid out within the radius around the centre, linked ideas closer,
+//    deterministic, chains reaching outside the ideas ignored.
+
+const ft = (id: string, x: number, y: number, glow = 0, name = id): ForestTopic => ({
+	id,
+	name,
+	scope: "",
+	degrees: [],
+	x,
+	y,
+	ideas: [],
+	counts: { seen: 0, held: 0, fast: 0 },
+	glow,
+});
+
+describe("forest geometry: forestLevel", () => {
+	it("switches at the thresholds", () => {
+		assert.equal(REGION_K, 0.12);
+		assert.equal(CLEARING_K, 1.2);
+		assert.equal(CLEARING_R, 160);
+		assert.equal(LABEL_BUDGET, 300);
+		assert.equal(forestLevel(0.05), "world");
+		assert.equal(forestLevel(0.12), "region");
+		assert.equal(forestLevel(1.19), "region");
+		assert.equal(forestLevel(1.2), "clearing");
+	});
+});
+
+describe("forest geometry: visibleTopics", () => {
+	const cam = { k: 0.5, x: 100, y: 0 };
+
+	it("projects with screen = world*k + (x,y)", () => {
+		const v = visibleTopics([ft("in", 1300, 0), ft("out", 1500, 0)], cam, 800, 600, 0);
+		assert.deepEqual(v.map((t) => t.id), ["in"]); // 1300*0.5+100 = 750 vs 850
+	});
+
+	it("keeps points inside the padded viewport and drops those outside", () => {
+		const ts = [ft("edge", 1500, 0), ft("far", 1700, 0), ft("neg", -400, 0), ft("above", 0, -300)];
+		// edge: 850 (<= 800+60), far: 950, neg: -100 (< -60), above: y -150 (< -60)
+		assert.deepEqual(visibleTopics(ts, cam, 800, 600, 60).map((t) => t.id), ["edge"]);
+		assert.deepEqual(visibleTopics(ts, cam, 800, 600, 100).map((t) => t.id), ["edge", "neg"]);
+	});
+
+	it("keeps input order and does not mutate", () => {
+		const ts = [ft("b", 100, 100), ft("a", 200, 200)];
+		const v = visibleTopics(ts, { k: 1, x: 0, y: 0 }, 800, 600, 0);
+		assert.deepEqual(v.map((t) => t.id), ["b", "a"]);
+		assert.notEqual(v, ts);
+	});
+});
+
+describe("forest geometry: pickLabels", () => {
+	const many = Array.from({ length: 500 }, (_, i) => ft(`t${i}`, i, 0, i % 7 === 0 ? 0.5 : 0, `name${i}`));
+
+	it("returns at most the budget", () => {
+		assert.equal(pickLabels(many, 300).length, 300);
+		assert.equal(pickLabels(many.slice(0, 10), 300).length, 10);
+	});
+
+	it("puts every lit topic before every fogged one", () => {
+		const picked = pickLabels(many, 300);
+		const firstFog = picked.findIndex((t) => t.glow === 0);
+		assert.ok(firstFog > 0);
+		assert.ok(picked.slice(firstFog).every((t) => t.glow === 0));
+		assert.equal(picked.filter((t) => t.glow > 0).length, many.filter((t) => t.glow > 0).length);
+	});
+
+	it("ranks brighter first, then ties by name, then id", () => {
+		const ts = [
+			ft("z", 0, 0, 0.5, "same"),
+			ft("a", 0, 0, 0.5, "same"),
+			ft("m", 0, 0, 0.5, "alpha"),
+			ft("bright", 0, 0, 0.9, "zzz"),
+			ft("fog2", 0, 0, 0, "b"),
+			ft("fog1", 0, 0, 0, "a"),
+		];
+		assert.deepEqual(pickLabels(ts, 10).map((t) => t.id), ["bright", "m", "a", "z", "fog1", "fog2"]);
+	});
+
+	it("does not mutate the input", () => {
+		const ts = [ft("b", 0, 0), ft("a", 0, 0, 1)];
+		const copy = [...ts];
+		pickLabels(ts, 5);
+		assert.deepEqual(ts, copy);
+		assert.equal(ts[0]?.id, "b");
+	});
+});
+
+describe("forest geometry: layoutClearing", () => {
+	const center = { x: 1000, y: -500 };
+	const ids = (n: number) => Array.from({ length: n }, (_, i) => `idea${i}`);
+	const dist = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.hypot(a.x - b.x, a.y - b.y);
+
+	it("puts a single idea exactly at the centre", () => {
+		const m = layoutClearing(["only"], [], center, CLEARING_R);
+		assert.deepEqual(m.get("only"), center);
+		assert.equal(m.size, 1);
+	});
+
+	it("keeps every idea within the radius for 1, 2 and 12 ideas", () => {
+		for (const n of [1, 2, 12]) {
+			const m = layoutClearing(ids(n), [], center, CLEARING_R);
+			assert.equal(m.size, n);
+			for (const p of m.values()) assert.ok(dist(p, center) <= CLEARING_R + 1e-6, `n=${n}`);
+		}
+	});
+
+	it("draws chained ideas closer than the average pair", () => {
+		const all = ids(12);
+		const m = layoutClearing(all, [chain("c1", ["idea3"], "idea8")], center, CLEARING_R);
+		let sum = 0;
+		let count = 0;
+		for (let i = 0; i < all.length; i++) {
+			for (let j = i + 1; j < all.length; j++) {
+				sum += dist(m.get(all[i] as string) as { x: number; y: number }, m.get(all[j] as string) as { x: number; y: number });
+				count++;
+			}
+		}
+		const linked = dist(m.get("idea3") as { x: number; y: number }, m.get("idea8") as { x: number; y: number });
+		assert.ok(linked < sum / count, `${linked} vs mean ${sum / count}`);
+	});
+
+	it("is deterministic", () => {
+		const cs = [chain("c1", ["idea1", "idea2"], "idea5")];
+		assert.deepEqual(layoutClearing(ids(8), cs, center, 160), layoutClearing(ids(8), cs, center, 160));
+	});
+
+	it("ignores chains whose members are outside the ideas", () => {
+		const base = layoutClearing(ids(6), [], center, 160);
+		const withStray = layoutClearing(ids(6), [chain("c1", ["ghost"], "idea2"), chain("c2", ["idea0"], "other")], center, 160);
+		assert.deepEqual(withStray, base);
+	});
+
+	it("returns an empty map for no ideas", () => {
+		assert.equal(layoutClearing([], [], center, 160).size, 0);
 	});
 });

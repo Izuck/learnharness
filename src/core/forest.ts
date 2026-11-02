@@ -18,6 +18,7 @@ import type {
 	StateCounts,
 } from "./contracts/forest.ts";
 import type { Placement, WorldFile, WorldTopic } from "./contracts/world.ts";
+import { incrementalLayout, type LayoutEdge } from "./layout.ts";
 import { WORLD_DEGREES } from "./world-layout.ts";
 import { mergePlacements } from "./world.ts";
 
@@ -166,4 +167,107 @@ function trailsOf(
 		}
 	}
 	return [...counts.values()].sort((x, y) => cmp(x.a, y.a) || cmp(x.b, y.b));
+}
+
+// ── Geometry: levels of detail, culling, labels, clearings ───────────────────
+
+/** Zoom below this: the world level (regions only). */
+export const REGION_K = 0.12;
+/** Zoom at or above this: the clearing level (one topic's ideas). */
+export const CLEARING_K = 1.2;
+/** A clearing's radius in world units (topic collide radius is 180). */
+export const CLEARING_R = 160;
+/** Topic labels drawn per frame at most. */
+export const LABEL_BUDGET = 300;
+
+export type ForestLevel = "world" | "region" | "clearing";
+
+export function forestLevel(k: number): ForestLevel {
+	if (k < REGION_K) return "world";
+	if (k < CLEARING_K) return "region";
+	return "clearing";
+}
+
+/** The view transform: screen = world * k + (x, y). */
+export interface ForestCamera {
+	k: number;
+	x: number;
+	y: number;
+}
+
+/** Topics whose screen point lies in the w×h viewport grown by `padPx`. One
+ *  pass, input order kept. */
+export function visibleTopics(
+	topics: readonly ForestTopic[],
+	cam: ForestCamera,
+	w: number,
+	h: number,
+	padPx: number,
+): ForestTopic[] {
+	const out: ForestTopic[] = [];
+	const minX = -padPx;
+	const maxX = w + padPx;
+	const minY = -padPx;
+	const maxY = h + padPx;
+	for (const t of topics) {
+		const sx = t.x * cam.k + cam.x;
+		const sy = t.y * cam.k + cam.y;
+		if (sx >= minX && sx <= maxX && sy >= minY && sy <= maxY) out.push(t);
+	}
+	return out;
+}
+
+const nameCollator = new Intl.Collator();
+
+/** The topics to label: lit before fogged, brighter before dimmer, then by name
+ *  (locale order) and id; at most `budget`. Does not mutate `topics`. */
+export function pickLabels(topics: readonly ForestTopic[], budget: number): ForestTopic[] {
+	return [...topics]
+		.sort((a, b) => b.glow - a.glow || nameCollator.compare(a.name, b.name) || cmp(a.id, b.id))
+		.slice(0, Math.max(0, budget));
+}
+
+/** Lay one topic's ideas out in a clearing: the chains' premise→conclusion
+ *  links become springs (chains reaching outside `ideaIds` are ignored), the
+ *  result is centred on `center` and scaled so the farthest idea sits at 0.85 of
+ *  `radius`. Deterministic; ids are sorted first so input order is irrelevant. */
+export function layoutClearing(
+	ideaIds: readonly string[],
+	chains: readonly GraphChain[],
+	center: { x: number; y: number },
+	radius: number,
+): Map<string, { x: number; y: number }> {
+	const ids = [...new Set(ideaIds)].sort(cmp);
+	const out = new Map<string, { x: number; y: number }>();
+	if (ids.length === 0) return out;
+	if (ids.length === 1) {
+		out.set(ids[0] as string, { x: center.x, y: center.y });
+		return out;
+	}
+
+	const inSet = new Set(ids);
+	const edges: LayoutEdge[] = [];
+	for (const c of chains) {
+		if (!inSet.has(c.conclusion)) continue;
+		for (const p of c.premises) if (p !== c.conclusion && inSet.has(p)) edges.push({ from: p, to: c.conclusion });
+	}
+	edges.sort((a, b) => cmp(a.from, b.from) || cmp(a.to, b.to));
+
+	const laid = incrementalLayout(ids.map((id) => ({ id })), edges, new Map());
+	let cx = 0;
+	let cy = 0;
+	for (const p of laid.values()) {
+		cx += p.x;
+		cy += p.y;
+	}
+	cx /= laid.size;
+	cy /= laid.size;
+	let far = 0;
+	for (const p of laid.values()) far = Math.max(far, Math.hypot(p.x - cx, p.y - cy));
+	const scale = far > 1e-9 ? (0.85 * radius) / far : 0;
+	for (const id of ids) {
+		const p = laid.get(id) as { x: number; y: number };
+		out.set(id, { x: center.x + (p.x - cx) * scale, y: center.y + (p.y - cy) * scale });
+	}
+	return out;
 }
