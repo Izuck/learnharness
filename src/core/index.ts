@@ -87,3 +87,10 @@ export * from "./coverage.ts";
 // ONE session→markdown formatter — the extractor's view and the user-facing
 // export share it. Pure, browser-safe.
 export * from "./session-markdown.ts";
+// forest.ts (forest view, 2026-11-02): the fog-of-war forest model — world +
+// placements + graph folded into lit topics, regions, trails, coverage. Pure,
+// browser-safe. world.ts / world-layout.ts / world-anchors.ts stay out of the
+// barrel; forest.ts imports what it needs from them directly.
+export * from "./contracts/world.ts";
+export * from "./contracts/forest.ts";
+export * from "./forest.ts";
