@@ -92,7 +92,7 @@ Isaac (an engineering student at Georgia Tech) wants to learn STEM properly befo
 - Every proposition LearnHarness's extraction pipeline adds to the graph is assigned to one world topic by a new **placer** step that runs after the merger (Sonnet).
 - The placer reads the proposition's statement and the topic list (narrowed first by text search), then appends `{nodeId, topicId, placedAt}` to `data/world/placements.jsonl`. That ledger is owned by the new system below.
 - It never writes LearnHarness's graph ledgers.
-- If nothing fits, it records `topicId: null` and the node shows in an "uncharted" margin. That signals a gap in the world file, not an error.
+- If nothing fits, it records `topicId: null`. That signals a gap in the world file, not an error. Such an idea is still drawn on the map, placed by its links and its closeness to the world's topics (§12).
 - Application-flavoured propositions (decision 6) are a teaching problem, not a placement one. The teacher and extractor prompts gain one instruction: state propositions in general form.
 
 **Ownership.** A new **Cartographer** system owns `data/world/*` (the topics file, layout and placements). It follows the sole-writer law.
@@ -256,3 +256,70 @@ He approved all of these fixes ("Plan all of them"):
 - **H. Switching backend mid-lesson.** Thinking blocks produced on one backend are dropped when the history is sent to the other, never resent as plain text.
 
 These can't be made equal, and that is accepted: the CLI has no thinking-off, and parallel tool calls arrive one at a time on the CLI.
+
+## 12. Content similarity and ideas off the map (added 2 November 2026)
+
+**Why.** Isaac considered opening the app beyond STEM and a 3D constellation, then decided both against (2 November 2026): it stays **STEM-centric**, and the visual stays a **flat forest**. What he kept from that discussion:
+- Closeness should also reflect what topics *mean*, not only shared courses, prerequisites and degrees.
+- Connections (trails) must still show.
+- Ideas that don't fit a world topic exactly, including ones from outside STEM or from fuzzy "how can I do X?" goals, should still land somewhere sensible. "It doesn't have to work perfectly." Probing and checking are weaker for such goals, and that is accepted.
+
+**Decided by Isaac.**
+1. STEM-centric. The fixed world of BS-STEM topics (§5) stays the backbone. No worlds for other domains.
+2. Flat 2D forest. No 3D constellation.
+3. Content similarity becomes an extra layout force. Connections still appear as trails (§6).
+4. Ideas that don't fit a topic are placed by **links plus closeness** instead of sitting in an "uncharted" list.
+5. Similarity comes from a small embedding model that runs locally. There is a one-time download of about 90 MB of model weights, with no plan or API usage per call.
+
+**Similarity.**
+- **Engine.** A local sentence-embedding model run inside the app's own Node process. It never runs in the browser bundle and never calls an API.
+  - The download goes to a cache under the data folder (`LH_DATA_DIR`), never into the repo.
+  - The model and its version are pinned, so the same text always gives the same vector.
+  - The model weights are data, not an executable, so the "no self-compiled executables" constraint (§3) is not affected.
+  - *(builder's call: the exact model and runtime; a widely used ~384-dimension English sentence model is the expectation.)*
+- **Topic vectors.**
+  - Each world topic is embedded from its name plus scope once, at layout time.
+  - Vectors are cached in `data/world/` keyed by topic id and model id, so a rerun only embeds new or changed topics.
+  - The Cartographer owns the cache (§5, "Ownership").
+- **Idea vectors.** An idea is embedded from its name plus statement when it is placed.
+
+**Similarity in the layout.**
+- At layout, each topic gets springs to its k most similar topics above a similarity threshold. These springs are weaker than prerequisite springs and course cohesion, so structure still dominates and similarity mostly settles neighbours and the position of shared topics.
+- The core layout stays pure. The script computes the similar pairs and their weights and passes them to the layout.
+- *(builder's call: k, threshold, strength; tune on the real world and report how far neighbours move.)*
+- **Timing.** This must land before Isaac's first real `world:layout`, because positions become permanent then (§5).
+- Degree anchors (§5) are unchanged: they still come from topic overlap.
+
+**Similarity in the placer.**
+- The placer's candidate topics for an idea (§5, "Placing ideas") come from embedding similarity combined with today's text search. This keeps the placer from missing a topic just because it is worded differently.
+- The placer still makes the final choice, or chooses `null`.
+
+**Ideas off the map.**
+- **Which ideas.** An idea whose latest placement is `null`, or whose topic has no position, gets its own position on the map. These ideas are stored in a new append-only ledger `data/world/idea-positions.jsonl`, `{nodeId, x, y, placedAt}`, latest line per node wins. The Cartographer is the sole writer.
+- **Where it lands.** From two signals:
+  - its **links**: the positioned topics of the ideas it shares a chain with;
+  - its **closeness**: its most similar world topics.
+
+  It settles into empty space near that spot without moving anything already placed. Positions stay permanent, as with topics (§2 anti-goal).
+- **When nothing is close.** If it has no links and nothing above the similarity threshold, it goes to the edge of the forest, on the side of the nearest degree region.
+- **How it shows.** It is drawn as a lone tree off the paths, visibly not a world topic. It lights up by its idea state like any idea. Clicking it opens the idea card (§6). Trails from its chains are drawn like any trail.
+- **Repositioning.** It is repositioned only if it is later placed onto a real topic. That appends a new placement line and the idea then shows in that topic's clearing.
+
+**Levelling.**
+- Off-map ideas earn idea states and XP like any idea (§7).
+- They never count toward degree coverage %, whose denominator stays the finite topic list (my call).
+
+**Non-goals.**
+- Worlds for non-STEM domains.
+- A shared world between users.
+- 3D.
+- Making probing work well for fuzzy goals.
+- Using similarity to change degree anchors.
+
+**Settled after the builder check (my calls unless marked).**
+- **When off-map positions are written.** In the same pass as the placer, after it has placed its whole batch, so the batch's own placements already count as links. An off-map neighbour counts as a link only if it was positioned earlier. If an idea has no positioned links yet, it is placed by closeness alone. Its position stays permanent even if links appear later; that weaker first placement is accepted.
+- **Retrying `null` placements.** When the world's topic set changes (a new generate, dedupe or layout run), the placer retries every idea whose latest placement is `null`, once per change, through the background semaphore. Each null line records the world identity it was decided against so the placer can tell which are stale. A retry that finds a topic appends a normal placement, and the idea moves into that topic's clearing.
+- **Native runtime.** A prebuilt npm module with native binaries (e.g. onnxruntime-node) is acceptable. The app already runs prebuilt native binaries from npm (Next.js's SWC compiler, esbuild), and §3 forbids only executables the builder compiles. If Windows Security ever flags it, fall back to the WASM build.
+- **Scale.** The real world is about 8,600 topics after dedupe, not 3,000–5,000. Tune for that. `world:layout` has not run yet, so similarity springs can shape every topic. A `--dry-run` before and after on the real world is expected, reporting how far topics moved.
+- **Empty space for off-map ideas.** An idea must be clearly distinguishable and must not overlap a clearing, another off-map idea or a trail. It may sit inside a degree region's cloud. The exact clearance is the builder's.
+- **Validating similarity.** There is no hard guard. The layout dry run prints displacement statistics against a no-similarity layout (mean, 90th percentile and maximum), plus the share of topics whose nearest neighbour changed. Isaac judges from those before the real layout.
