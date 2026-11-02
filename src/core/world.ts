@@ -425,13 +425,12 @@ export interface ActiveMerge {
 	reason: string;
 }
 
-/** The same:true decisions that still apply, oldest first (decidedAt, then
- *  key). A decision applies when it names a canonical whose slug is non-empty
- *  and every member still exists - as a topic id in `topicIds`, or as the
- *  canonical id of another applying decision (a canonical name the model coined
- *  that no course used). Resolved to a fixed point, so the result does not
- *  depend on object key order. */
-export function activeMerges(merges: TopicMerges, topicIds: ReadonlySet<string>): ActiveMerge[] {
+/** The decisions' resolution: those that apply, and those skipped because
+ *  their canonical id collides (see activeMerges). */
+function resolveMerges(
+	merges: TopicMerges,
+	topicIds: ReadonlySet<string>,
+): { active: ActiveMerge[]; collisions: ActiveMerge[] } {
 	const all: ActiveMerge[] = [];
 	for (const [key, d] of Object.entries(merges.decisions)) {
 		if (!d.same) continue;
@@ -445,18 +444,55 @@ export function activeMerges(merges: TopicMerges, topicIds: ReadonlySet<string>)
 	all.sort((p, q) => cmp(decidedAt(p), decidedAt(q)) || cmp(p.key, q.key));
 
 	const applying = new Set<ActiveMerge>();
+	const collided = new Set<ActiveMerge>();
+	// canonical id -> ids of the decisions applied under it (members and the id).
+	const claims = new Map<string, Set<string>>();
 	const known = new Set(topicIds);
 	let grew = true;
 	while (grew) {
 		grew = false;
 		for (const m of all) {
-			if (applying.has(m) || !m.members.every((id) => known.has(id))) continue;
+			if (applying.has(m) || collided.has(m) || !m.members.every((id) => known.has(id))) continue;
+			// A canonical name that is another raw topic, or that another decision
+			// (with no member in common) already claimed, would silently absorb
+			// unrelated topics into it.
+			const claimed = claims.get(m.canonicalId);
+			if (
+				(topicIds.has(m.canonicalId) && !m.members.includes(m.canonicalId)) ||
+				(claimed !== undefined && !m.members.some((id) => claimed.has(id)))
+			) {
+				collided.add(m);
+				continue;
+			}
 			applying.add(m);
 			known.add(m.canonicalId);
+			const set = claims.get(m.canonicalId) ?? new Set<string>();
+			for (const id of m.members) set.add(id);
+			set.add(m.canonicalId);
+			claims.set(m.canonicalId, set);
 			grew = true;
 		}
 	}
-	return all.filter((m) => applying.has(m));
+	return { active: all.filter((m) => applying.has(m)), collisions: all.filter((m) => collided.has(m)) };
+}
+
+/** The same:true decisions that still apply, oldest first (decidedAt, then
+ *  key). A decision applies when it names a canonical whose slug is non-empty
+ *  and every member still exists - as a topic id in `topicIds`, or as the
+ *  canonical id of another applying decision (a canonical name the model coined
+ *  that no course used). A decision is skipped (see mergeCollisions) when its
+ *  canonical id is a raw topic that is not one of its members, or was already
+ *  claimed by an earlier decision sharing no member with it: either would
+ *  fold unrelated topics together. Resolved to a fixed point, so the result
+ *  does not depend on object key order. */
+export function activeMerges(merges: TopicMerges, topicIds: ReadonlySet<string>): ActiveMerge[] {
+	return resolveMerges(merges, topicIds).active;
+}
+
+/** The same:true decisions skipped by activeMerges because their canonical id
+ *  collides with an unrelated topic or decision, so a caller can report them. */
+export function mergeCollisions(merges: TopicMerges, topicIds: ReadonlySet<string>): ActiveMerge[] {
+	return resolveMerges(merges, topicIds).collisions;
 }
 
 /** Merged-away topic id -> canonical id, from the same:true decisions that

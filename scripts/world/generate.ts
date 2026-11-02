@@ -26,7 +26,7 @@ import type { CourseTopicsBatch, WorldDegree } from "../../src/core/contracts/wo
 import { isCourseTopicsBatch, topicSlug } from "../../src/core/world.ts";
 import { WORLD_DEGREES } from "../../src/core/world-layout.ts";
 import { worldStore } from "../../src/store/world.ts";
-import { buildWorld, readJson } from "./build-world.ts";
+import { buildWorld, readJson, readMerges } from "./build-world.ts";
 import { runClaudeJson } from "./claude-cli.ts";
 
 const PROMPTS = path.join(path.dirname(fileURLToPath(import.meta.url)), "prompts");
@@ -196,6 +196,8 @@ async function main(): Promise<void> {
 	const degrees = wanted.length ? WORLD_DEGREES.filter((d) => wanted.includes(d.id)) : [...WORLD_DEGREES];
 	if (degrees.length === 0) throw new Error(`No known degree in: ${wanted.join(", ")}`);
 	const log = (s: string): void => console.log(s);
+	// Fail before the long run, not after it, if the dedupe verdicts are corrupt.
+	readMerges(WORLD_FILES.merges);
 
 	await generateWorld({ degrees, buildDir: WORLD_FILES.build, ask: runClaudeJson, log });
 

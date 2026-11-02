@@ -48,10 +48,34 @@ export function readAllBatches(buildDir: string): CourseTopicsBatch[] {
 	return out;
 }
 
-/** The dedupe verdicts at `file`; empty when absent or unreadable. */
+/** The dedupe verdicts at `file`. Only a missing file is empty. A file that is
+ *  present but unreadable, unparseable or the wrong shape is a hard error:
+ *  treating it as empty would re-ask every group, overwrite the verdicts, and
+ *  let world:generate resurrect merged topics. */
 export function readMerges(file: string): TopicMerges {
-	const v = readJson(file);
-	return isTopicMerges(v) ? v : { version: 1, decisions: {} };
+	let raw: string;
+	try {
+		raw = fs.readFileSync(file, "utf-8");
+	} catch (e) {
+		if ((e as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, decisions: {} };
+		throw new Error(`Cannot read ${file}: ${e instanceof Error ? e.message : String(e)}`);
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch (e) {
+		throw new Error(
+			`${file} is not valid JSON (${e instanceof Error ? e.message : String(e)}). ` +
+				"Fix or delete it (deleting forgets every dedupe decision); nothing was changed.",
+		);
+	}
+	if (!isTopicMerges(parsed)) {
+		throw new Error(
+			`${file} is not a valid merge list (expected { version: 1, decisions: {...} }). ` +
+				"Fix or delete it (deleting forgets every dedupe decision); nothing was changed.",
+		);
+	}
+	return parsed;
 }
 
 /** Save the verdicts atomically (temp file, then rename), so an interrupted

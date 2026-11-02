@@ -17,6 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import type { runClaudeJson } from "../scripts/world/claude-cli.ts";
+import { buildWorld, readMerges } from "../scripts/world/build-world.ts";
 import { dedupeWorld } from "../scripts/world/dedupe.ts";
 import type {
 	CourseTopicsBatch,
@@ -27,10 +28,12 @@ import type {
 } from "../src/core/contracts/world.ts";
 import type { WorldStore } from "../src/core/ports.ts";
 import {
+	activeMerges,
 	aliasMap,
 	canonicalNameMap,
 	decisionKey,
 	dedupeCandidates,
+	mergeCollisions,
 	mergeDegreeTopics,
 	normaliseTopicName,
 	repointPlacements,
@@ -263,6 +266,39 @@ describe("aliasMap", () => {
 
 	it("ignores a same:true decision with no usable canonical", () => {
 		assert.equal(aliasMap(merges({ "a|b": decision(true), "c|d": decision(true, "  ") }), ids).size, 0);
+	});
+
+	it("skips a decision whose canonical is a raw topic that is not a member", () => {
+		const d = merges({ "a|b": decision(true, "D") });
+		assert.equal(aliasMap(d, ids).size, 0);
+		assert.deepEqual(activeMerges(d, ids), []);
+		assert.deepEqual(mergeCollisions(d, ids).map((m) => m.key), ["a|b"]);
+		// a member canonical is fine
+		assert.equal(aliasMap(merges({ "a|b": decision(true, "B") }), ids).size, 1);
+	});
+
+	it("skips a later decision that coins the same canonical as an unrelated earlier one", () => {
+		const m = merges({
+			"a|b": decision(true, "Heat Transfer", "2026-01-01T00:00:00.000Z"),
+			"c|d": decision(true, "Heat Transfer", "2026-01-02T00:00:00.000Z"),
+		});
+		assert.deepEqual([...aliasMap(m, ids)].sort(), [
+			["a", "heat-transfer"],
+			["b", "heat-transfer"],
+		]);
+		assert.deepEqual(mergeCollisions(m, ids).map((x) => x.key), ["c|d"]);
+	});
+
+	it("lets decisions sharing a member use the same canonical", () => {
+		const m = merges({
+			"a|b": decision(true, "A", "2026-01-01T00:00:00.000Z"),
+			"a|c": decision(true, "A", "2026-01-02T00:00:00.000Z"),
+		});
+		assert.deepEqual([...aliasMap(m, ids)].sort(), [
+			["b", "a"],
+			["c", "a"],
+		]);
+		assert.deepEqual(mergeCollisions(m, ids), []);
 	});
 
 	it("has canonical names for the targets", () => {
@@ -579,35 +615,177 @@ describe("dedupeWorld", () => {
 		assert.doesNotMatch(prompts[0] as string, /Transistor/);
 	});
 
-	it("lets the model merge just a subset of a mixed group, then re-asks about the rest", async () => {
+	it("merges a subset of a mixed group, then really asks again about the rest plus the merged topic", async () => {
 		writeBatch({
 			degree: "earth-space",
 			course: "Climate",
 			topics: [bt("Climate Change"), bt("Abrupt Climate Change")],
 		});
-		writeBatch({
-			degree: "env",
-			course: "Atmosphere",
-			topics: [bt("Climate and Climate Change"), bt("Climate Change Mitigation")],
-		});
+		writeBatch({ degree: "env", course: "Atmosphere", topics: [bt("Climate and Climate Change")] });
 		const { store, state } = memStore();
 		const prompts: string[] = [];
 		const judge = (names: string[]) => {
-			if (!names.some((n) => /Climate/.test(n))) return { same: false };
+			if (names.length !== 3) return { same: false, reason: "different grain" };
 			const a = names.indexOf("Climate Change") + 1;
 			const b = names.indexOf("Climate and Climate Change") + 1;
-			return a > 0 && b > 0
-				? { same: true, members: [a, b], canonical: "Climate Change", reason: "same" }
-				: { same: false, reason: "different grain" };
+			return { same: true, members: [a, b], canonical: "Climate Change", reason: "same" };
 		};
-		const s = await dedupeWorld({ ...common(), store, ask: fakeAsk(judge, prompts), log: () => {}, batchSize: 1 });
+		const s = await dedupeWorld({ ...common(), store, ask: fakeAsk(judge, prompts), log: () => {} });
+		// pass 1: the 3-group. The merged topic now shares the course "Climate"
+		// with "Abrupt Climate Change", so the fuzzy filter alone would drop the
+		// pair; pass 2 asks about it because it is re-offered explicitly.
+		assert.equal(prompts.length, 2);
+		assert.match(prompts[1] as string, /"Abrupt Climate Change"/);
+		assert.match(prompts[1] as string, /"Climate Change"/);
+		assert.doesNotMatch(prompts[1] as string, /"Climate and Climate Change"/);
 		const merges = JSON.parse(fs.readFileSync(path.join(buildDir, "merges.json"), "utf-8")) as TopicMerges;
 		assert.equal(merges.decisions["climate-and-climate-change|climate-change"]?.same, true);
+		assert.equal(merges.decisions["abrupt-climate-change|climate-change"]?.same, false);
 		assert.equal(s.merged, 1);
+		assert.equal(s.keptSeparate, 1);
 		const ids = (state.world?.topics ?? []).map((t) => t.id);
-		assert.equal(ids.includes("climate-and-climate-change"), false);
-		assert.equal(ids.includes("abrupt-climate-change"), true);
-		assert.equal(ids.includes("climate-change-mitigation"), true);
+		assert.deepEqual(ids, ["abrupt-climate-change", "climate-change"]);
+	});
+
+	describe("passes", () => {
+		const variants = (): void => {
+			for (let i = 1; i <= 6; i++) {
+				writeBatch({ degree: "cs", course: `Course ${i}`, topics: [bt(`Gradient Descent Variant ${i}`)] });
+			}
+		};
+		// Always merge the first two listed members and keep the first one's name,
+		// so a group of n becomes one of n-1 and is offered again.
+		const mergeFirstTwo = (names: string[]) => ({ same: true, members: [1, 2], canonical: names[0], reason: "same" });
+
+		it("keeps going until the leftovers are all folded in", async () => {
+			variants();
+			const { store, state } = memStore();
+			const prompts: string[] = [];
+			await dedupeWorld({ ...common(), store, ask: fakeAsk(mergeFirstTwo, prompts), log: () => {} });
+			assert.equal(prompts.length, 5);
+			assert.equal(state.world?.topics.length, 1);
+		});
+
+		it("stops at maxPasses, leaving the rest for the next run", async () => {
+			variants();
+			const { store, state } = memStore();
+			const prompts: string[] = [];
+			const s = await dedupeWorld({ ...common(), store, ask: fakeAsk(mergeFirstTwo, prompts), log: () => {}, maxPasses: 3 });
+			assert.equal(prompts.length, 3);
+			assert.equal(state.world?.topics.length, 3);
+			assert.equal(s.undecided >= 1, true);
+			// the next run resumes where it stopped
+			const more: string[] = [];
+			await dedupeWorld({ ...common(), store, ask: fakeAsk(mergeFirstTwo, more), log: () => {}, maxPasses: 3 });
+			assert.equal(more.length >= 1, true);
+		});
+	});
+
+	it("never overwrites an existing decision with a subset verdict", async () => {
+		writeBatch({ degree: "earth-space", course: "Climate", topics: [bt("Climate Change"), bt("Abrupt Climate Change")] });
+		writeBatch({ degree: "env", course: "Atmosphere", topics: [bt("Climate and Climate Change")] });
+		fs.writeFileSync(
+			path.join(buildDir, "merges.json"),
+			JSON.stringify({ version: 1, decisions: { "climate-and-climate-change|climate-change": decision(false) } }),
+		);
+		const { store } = memStore();
+		const logs: string[] = [];
+		const judge = (names: string[]) => {
+			if (names.length !== 3) return { same: false };
+			return {
+				same: true,
+				members: [names.indexOf("Climate Change") + 1, names.indexOf("Climate and Climate Change") + 1],
+				canonical: "Climate Change",
+			};
+		};
+		const s = await dedupeWorld({ ...common(), store, ask: fakeAsk(judge), log: (l) => logs.push(l) });
+		const merges = JSON.parse(fs.readFileSync(path.join(buildDir, "merges.json"), "utf-8")) as TopicMerges;
+		assert.equal(merges.decisions["climate-and-climate-change|climate-change"]?.same, false);
+		assert.equal(s.merged, 0);
+		assert.ok(logs.some((l) => /already decided/.test(l)));
+	});
+
+	it("leaves undecided a canonical already coined by another decision (same reply)", async () => {
+		writeBatch({
+			degree: "me",
+			course: "Heat",
+			topics: [bt("Conduction Heat Flow"), bt("Heat Flow by Conduction")],
+		});
+		writeBatch({
+			degree: "physics",
+			course: "Thermal",
+			topics: [bt("Radiation Heat Exchange"), bt("Heat Exchange, Radiation")],
+		});
+		const { store, state } = memStore();
+		const logs: string[] = [];
+		const s = await dedupeWorld({
+			...common(),
+			store,
+			ask: fakeAsk(() => ({ same: true, canonical: "Heat Transfer" })),
+			log: (l) => logs.push(l),
+		});
+		assert.equal(s.merged, 1);
+		const merges = JSON.parse(fs.readFileSync(path.join(buildDir, "merges.json"), "utf-8")) as TopicMerges;
+		assert.equal(Object.keys(merges.decisions).length, 1);
+		assert.equal(state.world?.topics.length, 3, "only one pair folded; the other pair is not absorbed");
+		assert.ok(logs.some((l) => /unrelated merge/.test(l)));
+		// the same holds across calls and reruns: the claim comes from merges.json
+		const more: string[] = [];
+		const again = await dedupeWorld({
+			...common(),
+			store,
+			ask: fakeAsk(() => ({ same: true, canonical: "Heat Transfer" }), more),
+			log: () => {},
+		});
+		assert.equal(again.merged, 0);
+		assert.equal(state.world?.topics.length, 3);
+	});
+
+	it("stops after 3 failed calls in a row, keeping what it had", async () => {
+		seedBatches();
+		writeBatch({ degree: "me", course: "Heat", topics: [bt("Heat Transfer"), bt("Heat Transfers")] });
+		const { store } = memStore();
+		let calls = 0;
+		const logs: string[] = [];
+		const ask = (async () => {
+			calls++;
+			throw new Error("plan limit");
+		}) as unknown as typeof runClaudeJson;
+		await dedupeWorld({ ...common(), store, ask, log: (l) => logs.push(l), batchSize: 1 });
+		assert.equal(calls, 6, "3 failed calls, each tried twice; the 4th group is never asked");
+		assert.ok(logs.some((l) => /Stopped early/.test(l)));
+		assert.equal(fs.existsSync(path.join(buildDir, "merges.json")), false);
+	});
+
+	it("retries a failed call once and carries on when the retry works", async () => {
+		seedBatches();
+		writeBatch({ degree: "me", course: "Heat", topics: [bt("Heat Transfer"), bt("Heat Transfers")] });
+		const { store } = memStore();
+		let calls = 0;
+		const inner = fakeAsk(sameIfBiotechOrBjt);
+		const ask = (async (o: unknown) => {
+			calls++;
+			if (calls === 1) throw new Error("transient");
+			return inner(o as never);
+		}) as unknown as typeof runClaudeJson;
+		const s = await dedupeWorld({ ...common(), store, ask, log: () => {}, batchSize: 1 });
+		assert.equal(calls, 5, "4 groups + 1 retry");
+		assert.equal(s.newlyDecided, 4);
+	});
+
+	it("refuses on a corrupt merges.json instead of treating it as empty", async () => {
+		seedBatches();
+		fs.writeFileSync(path.join(buildDir, "merges.json"), "{ not json");
+		const { store, state } = memStore();
+		let asked = 0;
+		const ask = (async () => {
+			asked++;
+			return { decisions: [] };
+		}) as unknown as typeof runClaudeJson;
+		await assert.rejects(dedupeWorld({ ...common(), store, ask, log: () => {} }), /merges\.json is not valid JSON/);
+		assert.equal(asked, 0);
+		assert.equal(state.writes, 0);
+		assert.equal(fs.readFileSync(path.join(buildDir, "merges.json"), "utf-8"), "{ not json");
 	});
 
 	it("rejects a canonical name that is another existing topic", async () => {
@@ -685,6 +863,10 @@ describe("dedupeWorld", () => {
 			dedupeWorld({ ...common(), store, ask: fakeAsk(sameIfBiotechOrBjt), log: () => {} }),
 			/position.*--force/s,
 		);
+		await assert.rejects(
+			dedupeWorld({ ...common(), store, ask: fakeAsk(sameIfBiotechOrBjt), log: () => {} }),
+			/Caused by 1 group\(s\): bipolar-junction-transistor\|bipolar-junction-transistors/,
+		);
 		assert.equal(state.writes, 0);
 		assert.equal(fs.existsSync(path.join(buildDir, "merges.json")), false);
 
@@ -707,5 +889,55 @@ describe("dedupeWorld", () => {
 		await dedupeWorld({ ...common(), store, ask, log: () => {}, batchSize: 1 });
 		const merges = JSON.parse(fs.readFileSync(path.join(buildDir, "merges.json"), "utf-8")) as TopicMerges;
 		assert.equal(Object.keys(merges.decisions).length, 1);
+	});
+});
+
+describe("readMerges / buildWorld (the generate path)", () => {
+	const mergesFile = (): string => path.join(buildDir, "merges.json");
+
+	it("reads a missing file as empty, but refuses a present file that is unreadable as a merge list", () => {
+		assert.deepEqual(readMerges(mergesFile()), { version: 1, decisions: {} });
+		fs.writeFileSync(mergesFile(), "oops");
+		assert.throws(() => readMerges(mergesFile()), /not valid JSON/);
+		fs.writeFileSync(mergesFile(), JSON.stringify({ version: 2, decisions: {} }));
+		assert.throws(() => readMerges(mergesFile()), /not a valid merge list/);
+		fs.writeFileSync(mergesFile(), JSON.stringify({ version: 1, decisions: { "a|b": { same: "yes" } } }));
+		assert.throws(() => readMerges(mergesFile()), /not a valid merge list/);
+	});
+
+	it("applies merges.json and carries positions and anchors; a corrupt file is a hard error", () => {
+		seedBatches();
+		fs.writeFileSync(
+			mergesFile(),
+			JSON.stringify({
+				version: 1,
+				decisions: {
+					"bipolar-junction-transistor|bipolar-junction-transistors": decision(true, "Bipolar Junction Transistor"),
+				},
+			}),
+		);
+		const prev: WorldFile = {
+			version: 1,
+			generatedAt: "t",
+			degrees: [],
+			anchors: { ee: { x: 1, y: 2 } },
+			topics: [{ ...topic("Diodes", ["Electronics"], { degrees: ["ee"] }), position: { x: 3, y: 4 } }],
+		};
+		const { store, state } = memStore(prev);
+		const reportFile = path.join(buildDir, "WORLD.md");
+		const plan = buildWorld({ buildDir, mergesFile: mergesFile(), reportFile, store, now: () => "now" });
+		const ids = (state.world?.topics ?? []).map((t) => t.id);
+		assert.equal(ids.includes("bipolar-junction-transistors"), false);
+		assert.equal(ids.includes("bipolar-junction-transistor"), true);
+		assert.deepEqual(state.world?.topics.find((t) => t.id === "diodes")?.position, { x: 3, y: 4 });
+		assert.deepEqual(state.world?.anchors, { ee: { x: 1, y: 2 } });
+		assert.equal(state.world?.generatedAt, "now");
+		assert.equal(plan.aliases.get("bipolar-junction-transistors"), "bipolar-junction-transistor");
+		assert.match(fs.readFileSync(reportFile, "utf-8"), /# World/);
+
+		fs.writeFileSync(mergesFile(), "{");
+		const writes = state.writes;
+		assert.throws(() => buildWorld({ buildDir, mergesFile: mergesFile(), reportFile, store }), /not valid JSON/);
+		assert.equal(state.writes, writes);
 	});
 });

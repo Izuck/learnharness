@@ -47,6 +47,7 @@ import {
 	canonicalNameMap,
 	decisionKey,
 	dedupeCandidates,
+	mergeCollisions,
 	mergeDegreeTopics,
 	mergePlacements,
 	repointPlacements,
@@ -114,6 +115,8 @@ export interface DedupeOptions {
 	force?: boolean;
 	/** Groups per model call (default 40). */
 	batchSize?: number;
+	/** Most ask passes per run (default 5); see MAX_PASSES. */
+	maxPasses?: number;
 	now?: () => string;
 	degrees?: readonly WorldDegree[];
 }
@@ -143,6 +146,9 @@ interface Verdict {
 	/** The topic ids the verdict is about: the whole group, or - when the model
 	 *  found only some members to be the same concept - that subset. */
 	ids: string[];
+	/** The group's members NOT in `ids` (a subset verdict); they are offered again
+	 *  with the merged topic on the next pass. Empty for a whole-group verdict. */
+	rest: string[];
 	same: boolean;
 	canonical?: string;
 	reason: string;
@@ -178,12 +184,25 @@ export function buildDedupePrompt(groups: readonly string[][], byId: ReadonlyMap
  *  index. same:true needs a canonical name that slugs to something and is not
  *  another existing topic; `members` (1-based numbers within the group) may name
  *  a subset of two or more members, so a mixed group still folds its true
- *  duplicates (the rest regroup with the merged topic on the next pass).
- *  Anything else is left out (undecided). */
-function validateReply(
+ *  duplicates (the rest are offered again with the merged topic on the next
+ *  pass). Anything else is left out (undecided): a canonical that is another
+ *  existing topic, or that another decision (from merges.json or this run)
+ *  already uses without sharing a member, would absorb unrelated topics; and an
+ *  existing decision is never overwritten. Accepted verdicts are recorded in
+ *  `ctx` so later verdicts in the same run see them. */
+export interface ReplyContext {
+	/** Every topic id that exists (raw and merged). */
+	existingIds: ReadonlySet<string>;
+	/** Keys of decisions already made, this run included. */
+	decidedKeys: Set<string>;
+	/** Canonical id -> the ids (members and the canonical itself) of the decisions using it. */
+	claimed: Map<string, Set<string>>;
+}
+
+export function validateReply(
 	reply: unknown,
 	chunk: readonly string[][],
-	existingIds: ReadonlySet<string>,
+	ctx: ReplyContext,
 	log: (s: string) => void,
 ): Map<number, Verdict> {
 	const out = new Map<number, Verdict>();
@@ -197,7 +216,13 @@ function validateReply(
 		if (!members || out.has(idx) || typeof d.same !== "boolean") continue;
 		const reason = typeof d.reason === "string" ? d.reason.trim().replace(/\s+/g, " ") : "";
 		if (!d.same) {
-			out.set(idx, { ids: [...members], same: false, reason });
+			const key = decisionKey(members);
+			if (ctx.decidedKeys.has(key)) {
+				log(`  group ${idx + 1}: already decided; left as is`);
+				continue;
+			}
+			ctx.decidedKeys.add(key);
+			out.set(idx, { ids: [...members], rest: [], same: false, reason });
 			continue;
 		}
 		let ids = [...members];
@@ -216,11 +241,26 @@ function validateReply(
 			log(`  group ${idx + 1}: same:true without a usable canonical name; left undecided`);
 			continue;
 		}
-		if (existingIds.has(id) && !ids.includes(id)) {
+		if (ctx.existingIds.has(id) && !ids.includes(id)) {
 			log(`  group ${idx + 1}: canonical "${canonical}" is a different existing topic; left undecided`);
 			continue;
 		}
-		out.set(idx, { ids, same: true, canonical, reason });
+		const claimedBy = ctx.claimed.get(id);
+		if (claimedBy !== undefined && !ids.some((m) => claimedBy.has(m))) {
+			log(`  group ${idx + 1}: canonical "${canonical}" is already the canonical of an unrelated merge; left undecided`);
+			continue;
+		}
+		const key = decisionKey(ids);
+		if (ctx.decidedKeys.has(key)) {
+			log(`  group ${idx + 1}: ${key} is already decided; existing decision kept`);
+			continue;
+		}
+		ctx.decidedKeys.add(key);
+		const set = ctx.claimed.get(id) ?? new Set<string>();
+		for (const m of ids) set.add(m);
+		set.add(id);
+		ctx.claimed.set(id, set);
+		out.set(idx, { ids, rest: members.filter((m) => !ids.includes(m)), same: true, canonical, reason });
 	}
 	return out;
 }
@@ -315,18 +355,26 @@ export async function dedupeWorld(o: DedupeOptions): Promise<DedupeSummary> {
 		const hit = [...view(m).aliases.keys()].filter((id) => positioned.has(id)).sort();
 		if (hit.length === 0) return;
 		const eg = hit.slice(0, 5).join(", ");
+		const hitSet = new Set(hit);
+		const causes = activeMerges(m, rawIds)
+			.filter((a) => a.members.some((id) => hitSet.has(id)))
+			.map((a) => a.key);
+		const because = `Caused by ${causes.length} group(s): ${causes.slice(0, 5).join("; ")}${causes.length > 5 ? "; ..." : ""}.`;
 		if (o.force || o.dryRun) {
-			log(`${o.force ? "--force:" : "Warning (dry run):"} ${hit.length} topic(s) to merge away already have a layout position (${eg}); their positions would be dropped.`);
+			log(`${o.force ? "--force:" : "Warning (dry run):"} ${hit.length} topic(s) to merge away already have a layout position (${eg}); their positions would be dropped. ${because}`);
 			return;
 		}
 		throw new Error(
-			`Refusing: ${hit.length} topic(s) that would be merged away already have a layout position (e.g. ${eg}). ` +
+			`Refusing: ${hit.length} topic(s) that would be merged away already have a layout position (e.g. ${eg}). ${because} ` +
 				"Merging them would change the saved layout. Run dedupe before world:layout, or pass --force to merge anyway " +
 				"(the canonical topic keeps its own position; merged-away positions are dropped).",
 		);
 	};
 
 	guardPositions(merges);
+	for (const c of mergeCollisions(merges, rawIds)) {
+		log(`Not applied: ${c.key} -> "${c.canonicalName}" (that name is another topic or another merge's canonical). Edit or delete the decision in ${o.mergesFile}.`);
+	}
 
 	let current = view(merges);
 	const initial = dedupeCandidates(current.topics);
@@ -340,16 +388,35 @@ export async function dedupeWorld(o: DedupeOptions): Promise<DedupeSummary> {
 	if (!o.noAsk) {
 		const prompt = fs.readFileSync(path.join(PROMPTS, "dedupe.md"), "utf-8");
 		const asked = new Set<string>();
+		const decidedKeys = new Set(Object.keys(merges.decisions));
+		const claimed = new Map<string, Set<string>>();
+		for (const a of activeMerges(merges, rawIds)) {
+			const set = claimed.get(a.canonicalId) ?? new Set<string>();
+			for (const id of a.members) set.add(id);
+			set.add(a.canonicalId);
+			claimed.set(a.canonicalId, set);
+		}
+		/** Groups to offer again after a subset verdict: the merged topic plus the
+		 *  members left out. The merge unions courses, so the fuzzy filter (no shared
+		 *  course) would drop them from the natural candidates. */
+		let followUps: string[][] = [];
+		const maxPasses = Math.max(1, o.maxPasses ?? MAX_PASSES);
 		let failures = 0;
 		let stop = false;
-		for (let pass = 0; pass < MAX_PASSES && !stop; pass++) {
-			const todo = dedupeCandidates(current.topics).filter((g) => {
-				const key = decisionKey(g);
-				return !(key in merges.decisions) && !asked.has(key);
-			});
-			if (todo.length === 0) break;
+		for (let pass = 0; pass < maxPasses && !stop; pass++) {
 			const byId = new Map(current.topics.map((t) => [t.id, t]));
+			const wanted = new Map<string, string[]>();
+			for (const g of [...dedupeCandidates(current.topics), ...followUps]) {
+				if (g.length >= 2 && g.every((id) => byId.has(id))) wanted.set(decisionKey(g), [...g].sort());
+			}
+			followUps = [];
+			const todo = [...wanted]
+				.filter(([key]) => !(key in merges.decisions) && !asked.has(key))
+				.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+				.map(([, g]) => g);
+			if (todo.length === 0) break;
 			const existingIds = new Set([...rawIds, ...byId.keys()]);
+			const ctx: ReplyContext = { existingIds, decidedKeys, claimed };
 			let progressed = false;
 			const calls = chunks(todo, batchSize);
 			for (const [n, chunk] of calls.entries()) {
@@ -375,7 +442,7 @@ export async function dedupeWorld(o: DedupeOptions): Promise<DedupeSummary> {
 					continue;
 				}
 				failures = 0;
-				const verdicts = validateReply(reply, chunk, existingIds, log);
+				const verdicts = validateReply(reply, chunk, ctx, log);
 				const skipped = chunk.length - verdicts.size;
 				if (skipped > 0) log(`  ${skipped} group(s) not decided (left for the next run)`);
 				if (verdicts.size === 0) continue;
@@ -389,6 +456,7 @@ export async function dedupeWorld(o: DedupeOptions): Promise<DedupeSummary> {
 					newVerdicts.push({ key, verdict: v, names: ids.map((id) => byId.get(id)?.name ?? id) });
 					if (v.same) mergedNow++;
 					else keptNow++;
+					if (v.same && v.rest.length > 0) followUps.push([topicSlug(v.canonical ?? ""), ...v.rest]);
 				}
 				const next: TopicMerges = { version: 1, decisions };
 				guardPositions(next);
