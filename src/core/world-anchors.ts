@@ -2,13 +2,17 @@
  * World anchors — degree anchors derived from the generated topics.
  *
  * Degrees that teach many of the same topics should sit close on the world
- * map. The overlap of every pair of degrees becomes a distance, classical
- * multidimensional scaling (MDS) embeds those distances, and a similarity
- * transform (uniform scale + rotation or reflection + translation) fits the
- * embedding onto the hand-drawn anchors, so the map keeps the approved
- * mockup's orientation and scale while the relative placement comes from the
- * data. The stress of the 2D and 3D embeddings says how much a flat map
- * distorts the overlap structure, and whether a third dimension would help.
+ * map. The overlap of every pair of degrees becomes a distance (−ln of the
+ * similarity), classical multidimensional scaling (MDS) embeds those
+ * distances, and a least-squares similarity transform fits the embedding onto
+ * the hand-drawn anchors, which fixes its orientation, reflection and
+ * position. The fit's scale is then replaced: real similarities are small and
+ * bunched, the embedding is noisy, and a least-squares scale shrinks a poor
+ * fit toward the centroid, so the derived anchors are rescaled to have the
+ * hand-drawn anchors' RMS spread instead. A last pass pushes apart any two
+ * anchors that still sit closer than a minimum separation. The stress of the
+ * 2D and 3D embeddings says how much a flat map distorts the overlap
+ * structure, and whether a third dimension would help.
  *
  * PURE and DETERMINISTIC: no randomness, no clock, no I/O; degrees are always
  * visited in sorted id order.
@@ -26,12 +30,30 @@ export interface DerivedAnchors {
 	/** Normalised stress of the 2D and 3D embeddings (0 = perfect, 1 = useless);
 	 *  null when nothing was derived. */
 	stress: { d2: number; d3: number } | null;
+	/** The minimum distance enforced between any two anchors (world units);
+	 *  null when nothing was derived. */
+	minSeparation: number | null;
 }
 
 /** Default minimum number of topics a degree needs before its anchor is derived. */
 const MIN_TOPICS = 5;
 /** A degree needs at least this many qualifying degrees to be worth an embedding. */
 const MIN_CANDIDATES = 3;
+/**
+ * Similarity floor for the distance transform, δ = −ln(max(s, ε)). It only
+ * guards degrees that share nothing (s = 0 → δ = ∞); on the real world the
+ * smallest pair similarity is 0.006, so the floor never binds there. 1e-3 caps
+ * δ at ln 1000 ≈ 6.9, a little above the largest real distance (≈ 5.1), so a
+ * pair with no overlap at all is farther than any pair with some.
+ */
+const MIN_SIMILARITY = 1e-3;
+/** Minimum anchor separation as a fraction of the hand-drawn anchors' median
+ *  nearest-neighbour distance. On the approved map the median is 13,830 and the
+ *  closest pair (cs–compe) is 9,220, i.e. 0.67 x the median, so 0.6 (8,298)
+ *  lets derived neighbours sit a little closer than the closest hand-drawn
+ *  pair, but never on top of each other. */
+const MIN_SEPARATION_FACTOR = 0.6;
+const SEPARATION_MAX_PASSES = 500;
 const JACOBI_MAX_SWEEPS = 100;
 const EPS = 1e-12;
 
@@ -161,10 +183,16 @@ export function embeddingStress(
 /**
  * Pairwise degree distance from topic overlap. A topic taught by k ≥ 2
  * degrees weighs 1/(k−1), so a topic shared by two degrees counts fully and
- * calculus shared by thirteen barely counts. similarity(a,b) = Σw over the
- * topics both teach / min(|Tₐ|, |T_b|), clamped to [0,1]; distance = 1 −
- * similarity. `k` is the topic's full number of degrees, not just those in
- * `ids`.
+ * calculus shared by thirteen barely counts. similarity s(a,b) = Σw over the
+ * topics both teach / min(|Tₐ|, |T_b|), clamped to [0,1]; distance δ =
+ * −ln(max(s, 1e-3)), and δ(a,a) = 0. `k` is the topic's full number of
+ * degrees, not just those in `ids`.
+ *
+ * Why −ln and not 1 − s: real similarities are tiny and compressed (0.006 to
+ * 0.24, median 0.03), so 1 − s is almost uniform (0.76 to 0.99) and MDS on it
+ * is mostly noise. The log is monotone, so the neighbour order is unchanged,
+ * but it spreads the small similarities out (0.006 → 5.1, 0.03 → 3.5, 0.24 →
+ * 1.4) and turns "twice as similar" into a constant distance gap.
  */
 export function degreeDistances(topics: readonly WorldTopic[], ids: readonly string[]): number[][] {
 	const index = new Map(ids.map((id, i) => [id, i]));
@@ -184,7 +212,7 @@ export function degreeDistances(topics: readonly WorldTopic[], ids: readonly str
 			if (i === j) return 0;
 			const denom = Math.min(size[i]!, size[j]!);
 			const sim = denom > 0 ? Math.min(1, Math.max(0, s / denom)) : 0;
-			return 1 - sim;
+			return -Math.log(Math.max(sim, MIN_SIMILARITY)) || 0; // || 0 turns −0 into 0
 		}),
 	);
 }
@@ -250,11 +278,103 @@ export function fitSimilarity(from: readonly WorldPosition[], to: readonly World
 }
 
 /**
+ * Rescale `points` about their centroid so their RMS distance from it is
+ * `targetRms`. Points that all coincide are returned as they are.
+ */
+export function matchSpread(points: readonly WorldPosition[], targetRms: number): WorldPosition[] {
+	const n = points.length;
+	if (n === 0) return [];
+	const cx = points.reduce((s, p) => s + p.x, 0) / n;
+	const cy = points.reduce((s, p) => s + p.y, 0) / n;
+	const current = Math.sqrt(points.reduce((s, p) => s + (p.x - cx) ** 2 + (p.y - cy) ** 2, 0) / n);
+	if (current <= EPS) return points.map((p) => ({ ...p }));
+	const k = targetRms / current;
+	return points.map((p) => ({ x: cx + (p.x - cx) * k, y: cy + (p.y - cy) * k }));
+}
+
+/**
+ * Push apart any two points closer than `minDist`, in deterministic passes
+ * over index pairs (i<j) until none is, or SEPARATION_MAX_PASSES. A violating
+ * pair moves symmetrically along its own line to exactly `minDist`; if one of
+ * the two is `fixed` the other takes the whole move; two fixed points are
+ * left alone. Coincident points separate along a direction set by their
+ * indices. The input is not mutated.
+ */
+export function separateAnchors(
+	points: readonly WorldPosition[],
+	fixed: readonly boolean[],
+	minDist: number,
+): WorldPosition[] {
+	const out = points.map((p) => ({ ...p }));
+	const n = out.length;
+	for (let pass = 0; pass < SEPARATION_MAX_PASSES; pass++) {
+		let moved = false;
+		for (let i = 0; i < n - 1; i++) {
+			for (let j = i + 1; j < n; j++) {
+				if (fixed[i] && fixed[j]) continue;
+				const p = out[i]!;
+				const q = out[j]!;
+				const dx = q.x - p.x;
+				const dy = q.y - p.y;
+				const d = Math.hypot(dx, dy);
+				if (d >= minDist * (1 - 1e-9)) continue;
+				let ux: number;
+				let uy: number;
+				if (d <= EPS) {
+					const angle = (2 * Math.PI * (j - i)) / n;
+					ux = Math.cos(angle);
+					uy = Math.sin(angle);
+				} else {
+					ux = dx / d;
+					uy = dy / d;
+				}
+				const need = minDist - d;
+				const toP = fixed[i] ? 0 : fixed[j] ? need : need / 2;
+				const toQ = need - toP;
+				p.x -= ux * toP;
+				p.y -= uy * toP;
+				q.x += ux * toQ;
+				q.y += uy * toQ;
+				moved = true;
+			}
+		}
+		if (!moved) break;
+	}
+	return out;
+}
+
+/** RMS distance of the points from their centroid. */
+function rmsSpread(points: readonly WorldPosition[]): number {
+	const n = points.length;
+	const cx = points.reduce((s, p) => s + p.x, 0) / n;
+	const cy = points.reduce((s, p) => s + p.y, 0) / n;
+	return Math.sqrt(points.reduce((s, p) => s + (p.x - cx) ** 2 + (p.y - cy) ** 2, 0) / n);
+}
+
+/** Median over the points of the distance to the nearest other point. */
+function medianNearest(points: readonly WorldPosition[]): number {
+	const nearest = points.map((p, i) =>
+		Math.min(...points.filter((_, j) => j !== i).map((q) => Math.hypot(p.x - q.x, p.y - q.y))),
+	);
+	nearest.sort((a, b) => a - b);
+	const m = nearest.length >> 1;
+	return nearest.length % 2 ? nearest[m]! : (nearest[m - 1]! + nearest[m]!) / 2;
+}
+
+/**
  * Derive degree anchors from topic overlap. Degrees (keys of `fallback`) with
  * at least `minTopics` topics (default 5) are placed from data; the rest keep
  * their fallback anchor. With fewer than three such degrees, or an overlap
  * structure with no spread at all, nothing is derived and the fallback is
  * returned unchanged.
+ *
+ * Placement: the 2D MDS of the log-similarity distances is fitted to the
+ * hand-drawn anchors of the derived degrees (rotation or reflection and
+ * translation come from the least-squares fit), then rescaled about its
+ * centroid to the hand anchors' RMS spread, then relaxed so no two anchors
+ * are closer than MIN_SEPARATION_FACTOR x the median nearest-neighbour
+ * distance of those hand anchors. Kept degrees stay exactly where they are
+ * and count as fixed obstacles in that last step.
  */
 export function deriveDegreeAnchors(
 	topics: readonly WorldTopic[],
@@ -272,6 +392,7 @@ export function deriveDegreeAnchors(
 		derived: [],
 		kept: all,
 		stress: null,
+		minSeparation: null,
 	});
 	if (candidates.length < MIN_CANDIDATES) return unchanged();
 
@@ -281,15 +402,27 @@ export function deriveDegreeAnchors(
 	const flat = mds2.coords.map((c) => ({ x: c[0]!, y: c[1]! }));
 	if (flat.every((p) => Math.hypot(p.x - flat[0]!.x, p.y - flat[0]!.y) <= EPS)) return unchanged();
 
-	const fit = fitSimilarity(
-		flat,
-		candidates.map((d) => fallback[d]!),
+	const hand = candidates.map((d) => fallback[d]!);
+	const fit = fitSimilarity(flat, hand);
+	const spread = matchSpread(
+		flat.map((p) => fit.apply(p)),
+		rmsSpread(hand),
 	);
-	const placed = new Map(candidates.map((d, i) => [d, fit.apply(flat[i]!)]));
+
+	// Separate derived anchors from each other and from the kept ones.
+	const keptIds = all.filter((d) => !candidates.includes(d));
+	const minSeparation = MIN_SEPARATION_FACTOR * medianNearest(hand);
+	const separated = separateAnchors(
+		[...spread, ...keptIds.map((d) => fallback[d]!)],
+		[...spread.map(() => false), ...keptIds.map(() => true)],
+		minSeparation,
+	);
+	const placed = new Map(candidates.map((d, i) => [d, separated[i]!]));
 	return {
 		anchors: Object.fromEntries(all.map((d) => [d, placed.get(d) ?? { ...fallback[d]! }])),
 		derived: candidates,
-		kept: all.filter((d) => !placed.has(d)),
+		kept: keptIds,
 		stress,
+		minSeparation,
 	};
 }

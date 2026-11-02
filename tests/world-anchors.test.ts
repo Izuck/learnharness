@@ -1,9 +1,11 @@
 /**
  * World anchors (core/world-anchors.ts) — degree anchors derived from topic
- * overlap by classical MDS, aligned to the hand-drawn map. Properties: the
- * Jacobi eigen routine and MDS are exact on known inputs, a topic shared by k
- * degrees weighs 1/(k−1), heavily overlapping degrees end up close, degrees
- * with too little data keep their fallback, and the result is deterministic.
+ * overlap by classical MDS on a log-similarity distance, aligned to the
+ * hand-drawn map. Properties: the Jacobi eigen routine and MDS are exact on
+ * known inputs, a topic shared by k degrees weighs 1/(k−1), distance is
+ * −ln(similarity), heavily overlapping degrees end up close, the derived map
+ * keeps the hand-drawn map's spread and a minimum separation, degrees with
+ * too little data keep their fallback, and the result is deterministic.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -15,6 +17,8 @@ import {
 	embeddingStress,
 	fitSimilarity,
 	jacobiEigen,
+	matchSpread,
+	separateAnchors,
 } from "../src/core/world-anchors.ts";
 
 const near = (a: number, b: number, tol = 1e-9): void => assert.ok(Math.abs(a - b) <= tol, `${a} vs ${b}`);
@@ -163,28 +167,54 @@ describe("world anchors: overlap distance", () => {
 			...topics(2, ["d"]),
 		];
 		const D = degreeDistances(t, ["a", "b", "c", "d"]);
-		// |Ta| = |Tb| = 5; shared(a,b) = 2·1 + 1/3
-		near(D[0]![1]!, 1 - (2 + 1 / 3) / 5);
+		// |Ta| = |Tb| = 5; shared(a,b) = 2·1 + 1/3; distance = −ln(similarity)
+		near(D[0]![1]!, -Math.log((2 + 1 / 3) / 5));
 		// a,c share only the 4-way topic: shared = 1/3; |Ta| = 5, |Tc| = 3
-		near(D[0]![2]!, 1 - 1 / 3 / 3);
+		near(D[0]![2]!, -Math.log(1 / 3 / 3));
 		near(D[0]![0]!, 0);
 		near(D[1]![0]!, D[0]![1]!); // symmetric
 	});
 
 	it("a topic in every degree barely counts", () => {
-		const base = [...topics(5, ["a"]), ...topics(5, ["b"]), ...topics(5, ["c"])];
-		const everywhere = topics(1, ["a", "b", "c"]); // k=3 → w=1/2
-		const calc = topics(1, ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m"]); // w=1/12
+		// a and b share two topics of their own; one more shared topic is added, taught by
+		// just a and b (w=1), by three degrees (w=1/2) or by thirteen (w=1/12, "calculus").
+		const base = [...topics(5, ["a"]), ...topics(5, ["b"]), ...topics(5, ["c"]), ...topics(2, ["a", "b"])];
+		const three = topics(1, ["a", "b", "c"]);
+		const calc = topics(1, ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m"]);
 		const ids = ["a", "b", "c"];
 		const d0 = degreeDistances(base, ids)[0]![1]!;
-		const d1 = degreeDistances([...base, ...calc], ids)[0]![1]!;
-		const d2 = degreeDistances([...base, ...everywhere], ids)[0]![1]!;
-		assert.ok(d1 < d0 && d2 < d1 && d0 - d1 < 0.02);
+		const dOnly = degreeDistances([...base, ...topics(1, ["a", "b"])], ids)[0]![1]!;
+		const dThree = degreeDistances([...base, ...three], ids)[0]![1]!;
+		const dCalc = degreeDistances([...base, ...calc], ids)[0]![1]!;
+		assert.ok(dOnly < d0, "an exclusive shared topic brings them closer");
+		assert.ok(dOnly < dThree && dThree < dCalc, "the more degrees teach it, the less it counts");
+		assert.ok(Math.abs(dCalc - d0) < 0.15, "calculus barely moves them");
 	});
 
-	it("clamps similarity into [0,1]", () => {
+	it("clamps similarity into [0,1]: identical degrees are at distance 0", () => {
 		const D = degreeDistances(topics(3, ["a", "b"]), ["a", "b"]);
 		near(D[0]![1]!, 0);
+	});
+
+	it("floors similarity at 1e-3, so degrees sharing nothing are at distance ln(1000), not infinity", () => {
+		const D = degreeDistances([...topics(5, ["a"]), ...topics(5, ["b"])], ["a", "b"]);
+		near(D[0]![1]!, Math.log(1000));
+		near(D[1]![0]!, Math.log(1000));
+	});
+
+	it("keeps the order of the neighbours but stretches small similarities apart", () => {
+		// a–b share 1 of 50 topics (s = 0.02), a–c share 3 of 50 (s = 0.06): the old
+		// 1 − s put them 0.04 apart; −ln s puts them ln 3 ≈ 1.1 apart.
+		const t = [
+			...topics(1, ["a", "b"]),
+			...topics(3, ["a", "c"]),
+			...topics(46, ["a"]),
+			...topics(49, ["b"]),
+			...topics(47, ["c"]),
+		];
+		const D = degreeDistances(t, ["a", "b", "c"]);
+		assert.ok(D[0]![2]! < D[0]![1]!);
+		near(D[0]![1]! - D[0]![2]!, Math.log(3));
 	});
 });
 
@@ -233,6 +263,114 @@ describe("world anchors: fitSimilarity", () => {
 	});
 });
 
+const rms = (ps: readonly WorldPosition[]): number => {
+	const cx = ps.reduce((s, p) => s + p.x, 0) / ps.length;
+	const cy = ps.reduce((s, p) => s + p.y, 0) / ps.length;
+	return Math.sqrt(ps.reduce((s, p) => s + (p.x - cx) ** 2 + (p.y - cy) ** 2, 0) / ps.length);
+};
+const minPair = (ps: readonly WorldPosition[]): number => {
+	let m = Infinity;
+	for (let i = 0; i < ps.length; i++) for (let j = i + 1; j < ps.length; j++) m = Math.min(m, dist(ps[i]!, ps[j]!));
+	return m;
+};
+
+describe("world anchors: matchSpread", () => {
+	it("rescales about the centroid so the RMS distance from it is the target", () => {
+		const pts = [
+			{ x: 0, y: 0 },
+			{ x: 10, y: 0 },
+			{ x: 10, y: 10 },
+			{ x: 0, y: 10 },
+		];
+		const out = matchSpread(pts, 100);
+		near(rms(out), 100);
+		near((out[0]!.x + out[2]!.x) / 2, 5); // centroid unmoved
+		near((out[0]!.y + out[2]!.y) / 2, 5);
+		near(dist(out[0]!, out[1]!), dist(out[1]!, out[2]!)); // shape unchanged
+	});
+
+	it("leaves points that are all in one spot where they are", () => {
+		const pts = [
+			{ x: 3, y: 4 },
+			{ x: 3, y: 4 },
+		];
+		assert.deepEqual(matchSpread(pts, 50), pts);
+	});
+});
+
+describe("world anchors: separateAnchors", () => {
+	it("pushes two anchors that are too close apart along their own line, symmetrically", () => {
+		const out = separateAnchors(
+			[
+				{ x: 0, y: 0 },
+				{ x: 10, y: 0 },
+			],
+			[false, false],
+			100,
+		);
+		near(dist(out[0]!, out[1]!), 100, 1e-6);
+		near(out[0]!.y, 0);
+		near((out[0]!.x + out[1]!.x) / 2, 5); // midpoint unmoved
+	});
+
+	it("separates coincident anchors deterministically", () => {
+		const pts = [
+			{ x: 5, y: 5 },
+			{ x: 5, y: 5 },
+			{ x: 5, y: 5 },
+		];
+		const one = separateAnchors(pts, [false, false, false], 10);
+		assert.deepEqual(one, separateAnchors(pts, [false, false, false], 10));
+		assert.ok(minPair(one) >= 10 - 1e-6);
+	});
+
+	it("never moves a fixed anchor, and leaves already separated anchors alone", () => {
+		const out = separateAnchors(
+			[
+				{ x: 0, y: 0 },
+				{ x: 10, y: 0 },
+				{ x: 500, y: 500 },
+			],
+			[true, false, false],
+			100,
+		);
+		assert.deepEqual(out[0], { x: 0, y: 0 });
+		near(dist(out[0]!, out[1]!), 100, 1e-6);
+		assert.deepEqual(out[2], { x: 500, y: 500 });
+	});
+
+	it("does not mutate its input", () => {
+		const pts = [
+			{ x: 0, y: 0 },
+			{ x: 1, y: 0 },
+		];
+		separateAnchors(pts, [false, false], 100);
+		assert.deepEqual(pts, [
+			{ x: 0, y: 0 },
+			{ x: 1, y: 0 },
+		]);
+	});
+});
+
+const RING_IDS = ["a", "b", "c", "d", "e", "f"];
+/** Six degrees on a hexagon; neighbours on the ring share 6 topics, others 1. */
+function ring(): { fallback: Record<string, WorldPosition>; t: WorldTopic[] } {
+	const fallback = Object.fromEntries(
+		RING_IDS.map((d, i) => [
+			d,
+			{ x: 50000 + 20000 * Math.cos((i * Math.PI) / 3), y: 30000 + 20000 * Math.sin((i * Math.PI) / 3) },
+		]),
+	);
+	const t: WorldTopic[] = RING_IDS.flatMap((d) => topics(40, [d]));
+	for (let i = 0; i < 6; i++) {
+		for (let j = i + 1; j < 6; j++) {
+			const adjacent = j - i === 1 || j - i === 5;
+			t.push(...topics(adjacent ? 6 : 1, [RING_IDS[i]!, RING_IDS[j]!]));
+		}
+	}
+	return { fallback, t };
+}
+
 describe("world anchors: deriveDegreeAnchors", () => {
 	it("puts heavily overlapping degrees closer than degrees with no overlap", () => {
 		const out = deriveDegreeAnchors(twoPairs(), SQUARE);
@@ -266,6 +404,7 @@ describe("world anchors: deriveDegreeAnchors", () => {
 		assert.deepEqual(out.derived, []);
 		assert.deepEqual(out.kept, ["a", "b", "c", "d"]);
 		assert.equal(out.stress, null);
+		assert.equal(out.minSeparation, null);
 	});
 
 	it("is deterministic, and its keys are exactly the fallback keys", () => {
@@ -296,6 +435,83 @@ describe("world anchors: deriveDegreeAnchors", () => {
 		assert.ok(out.stress);
 		assert.ok(out.stress.d3 <= out.stress.d2 + 1e-9);
 		assert.ok(out.stress.d2 >= 0 && out.stress.d2 <= 1);
+	});
+
+	it("keeps the hand-drawn map's spread: derived RMS spread equals the hand RMS spread", () => {
+		const { fallback, t } = ring();
+		const out = deriveDegreeAnchors(t, fallback);
+		assert.deepEqual(out.derived, RING_IDS);
+		near(rms(RING_IDS.map((d) => out.anchors[d]!)), rms(RING_IDS.map((d) => fallback[d]!)), 1e-6);
+	});
+
+	it("measures the hand spread over the derived degrees only", () => {
+		const { fallback, t } = ring();
+		const far = { ...fallback, z: { x: 900000, y: -900000 } }; // kept: no topics
+		const out = deriveDegreeAnchors(t, far);
+		assert.deepEqual(out.kept, ["z"]);
+		near(rms(RING_IDS.map((d) => out.anchors[d]!)), rms(RING_IDS.map((d) => fallback[d]!)), 1e-6);
+		assert.deepEqual(out.anchors.z, { x: 900000, y: -900000 });
+	});
+
+	it("holds a minimum separation of 0.6 x the median nearest-neighbour distance of the hand anchors", () => {
+		// Hand anchors 1000 apart on a square: minimum separation 600.
+		const out = deriveDegreeAnchors(twoPairs(), SQUARE);
+		assert.ok(out.minSeparation !== null);
+		near(out.minSeparation, 600);
+		assert.ok(minPair(Object.values(out.anchors)) >= 600 - 1e-6);
+
+		// Three degrees that overlap almost totally would land nearly on top of each
+		// other; the separation pass keeps them apart.
+		const fallback = {
+			a: { x: 0, y: 0 },
+			b: { x: 1000, y: 0 },
+			c: { x: 0, y: 1000 },
+			x: { x: 1000, y: 1000 },
+		};
+		const t = [
+			...topics(20, ["a", "b", "c"]),
+			...topics(1, ["a"]),
+			...topics(1, ["b"]),
+			...topics(1, ["c"]),
+			...topics(20, ["x"]),
+		];
+		const tight = deriveDegreeAnchors(t, fallback);
+		assert.deepEqual(tight.derived, ["a", "b", "c", "x"]);
+		assert.ok(minPair(Object.values(tight.anchors)) >= 600 - 1e-6);
+	});
+
+	it("never moves a kept anchor to satisfy the separation, and keeps clear of it", () => {
+		// e is kept (3 topics) but sits right where derived degrees land.
+		const fallback = { ...SQUARE, e: { x: 500, y: 500 } };
+		const out = deriveDegreeAnchors([...twoPairs(), ...topics(3, ["e"])], fallback);
+		assert.deepEqual(out.kept, ["e"]);
+		assert.deepEqual(out.anchors.e, { x: 500, y: 500 });
+		for (const d of out.derived) assert.ok(dist(out.anchors[d]!, out.anchors.e!) >= out.minSeparation! - 1e-6, d);
+	});
+
+	it("does not collapse the anchors when every similarity is tiny and nearly equal", () => {
+		// Six degrees with 40 own topics each; every pair shares one topic, a–b two.
+		// Similarities are 0.025–0.05: with distance 1 − s that is a uniform 0.95–0.975,
+		// MDS is mostly noise and a least-squares fit shrinks the map to a blob.
+		const ids = ["a", "b", "c", "d", "e", "f"];
+		const hex = Object.fromEntries(
+			ids.map((d, i) => [
+				d,
+				{ x: 50000 + 20000 * Math.cos((i * Math.PI) / 3), y: 30000 + 20000 * Math.sin((i * Math.PI) / 3) },
+			]),
+		);
+		const t: WorldTopic[] = ids.flatMap((d) => topics(40, [d]));
+		for (let i = 0; i < ids.length; i++) {
+			for (let j = i + 1; j < ids.length; j++) t.push(...topics(1, [ids[i]!, ids[j]!]));
+		}
+		t.push(...topics(1, ["a", "b"]));
+		const out = deriveDegreeAnchors(t, hex);
+		assert.deepEqual(out.derived, ids);
+		const handRms = rms(ids.map((d) => hex[d]!));
+		const derivedRms = rms(ids.map((d) => out.anchors[d]!));
+		assert.ok(Math.abs(derivedRms - handRms) / handRms < 0.05, `spread ${derivedRms} vs ${handRms}`);
+		assert.ok(minPair(ids.map((d) => out.anchors[d]!)) >= out.minSeparation! - 1e-6);
+		assert.ok(out.minSeparation! >= 0.6 * 20000 - 1e-6); // hexagon side = radius = 20000
 	});
 
 	it("does not mutate its inputs", () => {
