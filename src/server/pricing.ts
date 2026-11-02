@@ -5,6 +5,7 @@
 import { calculateCost, type Usage } from "@earendil-works/pi-ai";
 import { piModels } from "../agent/models.ts";
 import { CUSTOM_PROVIDER } from "../core/auth-keys.ts";
+import { toApiModelId } from "../core/backend-parity.ts";
 import { CLAUDE_CODE_PROVIDER } from "../core/contracts/claude-code.ts";
 import type { CallUsage, ChatRecord, JobRecord, TurnUsage } from "../core/contracts.ts";
 import { isSubscriptionModel, sessionCost as foldSessionCost, turnCost as foldTurnCost, jobCost as foldJobCost } from "../core/prices.ts";
@@ -39,11 +40,21 @@ export function callCost(call: Partial<CallUsage>, modelId: string): number | nu
 	return Number.isFinite(total) && total >= 0 ? total : null;
 }
 
+/** ESTIMATE ONLY: a Claude plan (CLI) call priced at its API twin's catalog
+ * rate, so plan and API usage can be compared. Not spend - callCost stays
+ * null for CLI models and no total, job cost or report may add this in. */
+export function estimatedCallCost(call: Partial<CallUsage>, modelId: string): number | null {
+	const prefix = `${CLAUDE_CODE_PROVIDER}:`;
+	if (!modelId.startsWith(prefix)) return null;
+	const api = toApiModelId(modelId.slice(prefix.length));
+	return api === null ? null : callCost(call, `anthropic:${api}`);
+}
+
 export function turnCost(turn: TurnUsage): number | null {
 	return foldTurnCost(turn, callCost);
 }
 export function sessionCost(record: Pick<ChatRecord, "turns">) {
-	return foldSessionCost(record, callCost);
+	return foldSessionCost(record, callCost, estimatedCallCost);
 }
 export function jobCost(job: Pick<JobRecord, "usage">): number | null {
 	const usage = job.usage;

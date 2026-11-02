@@ -24,8 +24,9 @@ for (const model of CLAUDE_CODE_MODELS) test(`${model.id}: token usage is retain
 	assert.deepEqual(sumSteps(turn.steps), { ...step, cacheWrite1hTokens: undefined, reasoningTokens: undefined });
 	assert.equal(jobCost({ usage: accumulateJobUsage(undefined, id, step) }), null);
 	const html = renderToStaticMarkup(<StatsBar turns={[turn]} pricing={pricing} />);
-	assert(!html.includes("$0"));
-	assert.match(html, /data-testid="stats-cost">CLI<\/span>/);
+	assert(!html.includes("$0.0000"), "no fake zero");
+	assert.match(html, /data-testid="stats-cost">≈ \$\d+\.\d+ on plan<\/span>/, "an estimate, labelled as one");
+	assert.equal(pricing.cost, 0, "the estimate is not spend");
 	const summary = graphCostSummary({ chats: [{ title: "CLI fixture", extractions: [{ startedAt: 1, at: turn.at, durationMs: 1,
 		stages: { extractor: { model: id, steps: [step] }, auditor: { model: id, steps: [step] } },
 	}] }], sources: [] }, callCost);

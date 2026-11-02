@@ -1,6 +1,7 @@
 /** Client-safe accounting folds. Rates and calculation live on the server,
  * using Pi's catalog and calculateCost; no copied pricing table lives here. */
 import type { CallUsage, ChatRecord, JobRecord, TurnUsage } from "./contracts.ts";
+import { CLAUDE_CODE_PROVIDER } from "./contracts/claude-code.ts";
 import { NATIVE_SUBSCRIPTIONS } from "./contracts/subscriptions.ts";
 
 export type CallPricer = (usage: Partial<CallUsage>, model: string) => number | null;
@@ -11,6 +12,13 @@ export interface SessionPricing {
 	subscriptionProviders?: string[];
 	/** Derived at read time, keyed by the persisted turn's id. Never stored. */
 	turnCosts: Record<string, number | null>;
+	/** API-equivalent ESTIMATE for Claude plan (CLI) turns: what the same tokens
+	 *  would cost on the API. Never real spend - kept apart from `cost`. Present
+	 *  only when the session has CLI turns and the server could estimate. */
+	estimatedCost?: number;
+	/** CLI turns that could not be estimated (the label then falls back to "CLI"). */
+	estimatedUnpriced?: number;
+	estimatedTurnCosts?: Record<string, number | null>;
 }
 
 export function isChatGPTPlan(model: string | undefined): boolean {
@@ -52,19 +60,39 @@ export function turnCost(turn: Pick<TurnUsage, "model" | "steps">, price: CallPr
 	return total;
 }
 
-export function sessionCost(record: Pick<ChatRecord, "turns">, price: CallPricer): SessionPricing {
+function estimateSteps(turn: Pick<TurnUsage, "model" | "steps">, estimate: CallPricer): number | null {
+	let total = 0;
+	for (const step of turn.steps) {
+		const cost = estimate(step, turn.model);
+		if (cost === null) return null;
+		total += cost;
+	}
+	return total;
+}
+
+export function sessionCost(record: Pick<ChatRecord, "turns">, price: CallPricer, estimate?: CallPricer): SessionPricing {
 	let cost = 0;
 	let unpriced = 0;
 	let subscription = 0;
 	const turnCosts: Record<string, number | null> = {};
+	const estimatedTurnCosts: Record<string, number | null> = {};
+	let estimatedCost = 0;
+	let estimatedUnpriced = 0;
 	for (const turn of record.turns ?? []) {
 		const dollars = turnCost(turn, price);
 		turnCosts[turn.id] = dollars;
+		if (estimate && dollars === null && turn.model.startsWith(CLAUDE_CODE_PROVIDER + ":")) {
+			const guess = turn.steps.length === 0 ? null : estimateSteps(turn, estimate);
+			estimatedTurnCosts[turn.id] = guess;
+			if (guess === null) estimatedUnpriced++; else estimatedCost += guess;
+		}
 		if (isSubscriptionModel(turn.model)) subscription++;
 		else if (dollars === null) unpriced++;
 		else cost += dollars;
 	}
-	return { cost, unpriced, ...(subscription ? { subscription, subscriptionProviders: subscriptionLabels((record.turns ?? []).map((turn) => turn.model)) } : {}), turnCosts };
+	const estimated = Object.keys(estimatedTurnCosts).length > 0
+		? { estimatedCost, estimatedUnpriced, estimatedTurnCosts } : {};
+	return { cost, unpriced, ...estimated, ...(subscription ? { subscription, subscriptionProviders: subscriptionLabels((record.turns ?? []).map((turn) => turn.model)) } : {}), turnCosts };
 }
 
 export function jobCost(job: Pick<JobRecord, "usage">, price: CallPricer): number | null {

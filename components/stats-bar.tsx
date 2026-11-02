@@ -114,7 +114,11 @@ export function StatsBar({
 	const pricedCount = turns.length - unpriced - subscription;
 	const providers = pricing?.subscriptionProviders ?? subscriptionLabels(turns.map((turn) => turn.model));
 	const cliBilled = turns.some((turn) => turn.model.startsWith(`${CLAUDE_CODE_PROVIDER}:`));
-	const costLabel = planCostLabel(pricedCount > 0 ? cost : null, cliBilled ? [...providers, "CLI"] : providers);
+	// CLI turns are never spend: with a complete API-equivalent estimate the
+	// marker reads "≈ $x on plan"; otherwise it stays "CLI".
+	const estimate = pricing?.estimatedCost !== undefined && !pricing.estimatedUnpriced ? pricing.estimatedCost : null;
+	const cliLabel = estimate === null ? "CLI" : `≈ ${formatUsd(estimate)} on plan`;
+	const costLabel = planCostLabel(pricedCount > 0 ? cost : null, cliBilled ? [...providers, cliLabel] : providers);
 
 	return (
 		<div
@@ -198,7 +202,7 @@ export function StatsBar({
 												</span>
 												<span className="flex shrink-0 items-center gap-2 tabular-nums text-card-foreground">
 													<span className="text-muted-foreground">{turn.steps.length} steps</span>
-													<span>{turn.model.startsWith(`${CLAUDE_CODE_PROVIDER}:`) ? "CLI" : subscriptionLabel(turn.model) ?? (c === null ? "—" : formatUsd(c))}</span>
+													<span>{turn.model.startsWith(`${CLAUDE_CODE_PROVIDER}:`) ? (pricing?.estimatedTurnCosts?.[turn.id] != null ? `≈ ${formatUsd(pricing.estimatedTurnCosts[turn.id]!)} on plan` : "CLI") : subscriptionLabel(turn.model) ?? (c === null ? "—" : formatUsd(c))}</span>
 												</span>
 											</li>
 										);
