@@ -298,46 +298,49 @@ export function ForestView() {
 				</Notice>
 			)}
 			{snapshot && failed && (
-				<div className="pointer-events-none absolute right-3 top-3 z-10 text-xs text-muted-foreground">
+				<div className="pointer-events-none absolute right-3 top-14 z-10 text-xs text-muted-foreground">
 					Couldn&apos;t refresh
 				</div>
 			)}
 
+			{/* One top-left column BELOW the floating header row (h-13 = 52px): the
+			    coverage lines, then the uncharted control (its list drops down). */}
 			{hasForest && model && (
-				<div className="pointer-events-none absolute left-3 top-3 z-10 flex flex-col gap-0.5 text-xs text-muted-foreground">
-					<div>{`Mapped ${formatCoverage(model.coverage.mapped, model.coverage.total)} of undergrad STEM`}</div>
-					{unplaced > 0 && <div>{`${unplaced} ${unplaced === 1 ? "idea" : "ideas"} waiting to be placed`}</div>}
-				</div>
-			)}
-
-			{hasForest && uncharted.length > 0 && (
-				<div className="lh-no-drag absolute bottom-3 left-3 z-10 flex max-w-xs flex-col items-start gap-1">
-					{unchartedOpen && (
-						<div className="flex max-h-60 w-full flex-col overflow-y-auto rounded-xl border bg-card p-1 shadow-lg">
-							{uncharted.map((id) => {
-								const node = snapshot?.graph.propositions.find((n) => n.id === id);
-								return (
-									<button
-										key={id}
-										type="button"
-										disabled={!node}
-										onClick={() => node && setSelected({ node, anchor: null })}
-										className="truncate rounded-md px-2 py-1.5 text-left text-sm text-foreground transition-colors hover:bg-accent"
-									>
-										{node?.name ?? id}
-									</button>
-								);
-							})}
+				<div className="pointer-events-none absolute left-3 top-14 z-10 flex max-w-xs flex-col items-start gap-1.5">
+					<div className="flex flex-col gap-0.5 text-xs text-muted-foreground">
+						<div>{`Mapped ${formatCoverage(model.coverage.mapped, model.coverage.total)} of undergrad STEM`}</div>
+						{unplaced > 0 && <div>{`${unplaced} ${unplaced === 1 ? "idea" : "ideas"} waiting to be placed`}</div>}
+					</div>
+					{uncharted.length > 0 && (
+						<div className="lh-no-drag pointer-events-auto flex w-full flex-col items-start gap-1">
+							<button
+								type="button"
+								aria-expanded={unchartedOpen}
+								onClick={() => setUnchartedOpen((o) => !o)}
+								className="rounded-full border bg-card/85 px-3 py-1.5 text-xs text-muted-foreground shadow-lg backdrop-blur transition-colors hover:text-foreground"
+							>
+								{`Uncharted (${uncharted.length})`}
+							</button>
+							{unchartedOpen && (
+								<div className="flex max-h-60 w-full flex-col overflow-y-auto rounded-xl border bg-card p-1 shadow-lg">
+									{uncharted.map((id) => {
+										const node = snapshot?.graph.propositions.find((n) => n.id === id);
+										return (
+											<button
+												key={id}
+												type="button"
+												disabled={!node}
+												onClick={() => node && setSelected({ node, anchor: null })}
+												className="truncate rounded-md px-2 py-1.5 text-left text-sm text-foreground transition-colors hover:bg-accent"
+											>
+												{node?.name ?? id}
+											</button>
+										);
+									})}
+								</div>
+							)}
 						</div>
 					)}
-					<button
-						type="button"
-						aria-expanded={unchartedOpen}
-						onClick={() => setUnchartedOpen((o) => !o)}
-						className="rounded-full border bg-card/85 px-3 py-1.5 text-xs text-muted-foreground shadow-lg backdrop-blur transition-colors hover:text-foreground"
-					>
-						{`Uncharted (${uncharted.length})`}
-					</button>
 				</div>
 			)}
 
@@ -349,7 +352,7 @@ export function ForestView() {
 					sessions={snapshot.graph.sessions}
 					fileSources={snapshot.graph.fileSources}
 					nodeSessions={snapshot.graph.nodeSessions}
-					className={selected.anchor ? "absolute z-20" : "absolute bottom-14 left-3 z-20"}
+					className={selected.anchor ? "absolute z-20" : "absolute right-3 top-14 z-20"}
 					style={cardStyle}
 				/>
 			)}

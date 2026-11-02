@@ -106,8 +106,10 @@ export function buildForest(
 	};
 }
 
-/** One region per degree that has a positioned topic, at the centroid of those
- *  topics. Ordered as the world lists its degrees, any others by id. The name
+/** One region per degree that has a positioned topic, at the centroid of the
+ *  topics whose ONLY degree it is (a topic shared across degrees, like "Limits",
+ *  would drag every region toward the middle); a degree with no exclusive topic
+ *  falls back to all its topics. `topics` counts all of the degree's topics. Ordered as the world lists its degrees, any others by id. The name
  *  comes from the world's degrees, then the built-in WORLD_DEGREES, then the id. */
 function regionsOf(world: WorldFile, topics: readonly ForestTopic[]): ForestRegion[] {
 	const members = new Map<string, ForestTopic[]>();
@@ -125,12 +127,15 @@ function regionsOf(world: WorldFile, topics: readonly ForestTopic[]): ForestRegi
 	const listed = world.degrees.map((d) => d.id).filter((id) => members.has(id));
 	const rest = [...members.keys()].filter((id) => !listed.includes(id)).sort(cmp);
 	return [...new Set([...listed, ...rest])].map((degreeId) => {
-		const ts = members.get(degreeId) as ForestTopic[];
+		const all = members.get(degreeId) as ForestTopic[];
+		const own = all.filter((t) => t.degrees.length === 1);
+		const ts = own.length > 0 ? own : all;
 		return {
 			degreeId,
 			name: names.get(degreeId) ?? degreeId,
 			x: ts.reduce((s, t) => s + t.x, 0) / ts.length,
 			y: ts.reduce((s, t) => s + t.y, 0) / ts.length,
+			topics: all.length,
 		};
 	});
 }

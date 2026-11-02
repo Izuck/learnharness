@@ -6,7 +6,7 @@
 //    live nodes with no decision yet are "unplaced".
 // 3. TRAILS: derived from chains between distinct placed topics, one count per
 //    chain per pair; crossDegree when the two topics share no degree.
-// 4. REGIONS: the centroid of each degree's positioned topics.
+// 4. REGIONS: the centroid of each degree's own (single-degree) positioned topics.
 // 5. COVERAGE: topics with an idea / positioned topics; formatCoverage and
 //    topicGlow are exact.
 
@@ -243,16 +243,39 @@ describe("forest: buildForest — trails", () => {
 });
 
 describe("forest: buildForest — regions and coverage", () => {
-	it("regions sit at the centroid of their degree's topics", () => {
+	it("regions sit at the centroid of the topics only their degree holds", () => {
 		const f = buildForest(world, [], empty);
 		const math = f.regions.find((r) => r.degreeId === "math")!;
-		// positioned math topics: t1 (0,0), t2 (10,20), t4 (50,60)
-		assert.equal(math.x, 20);
-		assert.equal(math.y, (0 + 20 + 60) / 3);
+		// math-only positioned topics: t1 (0,0), t2 (10,20); t4 is shared with physics
+		assert.equal(math.x, 5);
+		assert.equal(math.y, 10);
 		assert.equal(math.name, "Maths (world)");
+		assert.equal(math.topics, 3, "size counts the shared topic too");
 		const physics = f.regions.find((r) => r.degreeId === "physics")!;
-		assert.equal(physics.x, (100 + 50) / 2);
-		assert.equal(physics.y, (100 + 60) / 2);
+		// physics-only: t3 (100,100)
+		assert.equal(physics.x, 100);
+		assert.equal(physics.y, 100);
+		assert.equal(physics.topics, 2);
+	});
+
+	it("a shared topic does not drag a region; a degree with only shared topics uses them all", () => {
+		const w: WorldFile = {
+			...world,
+			degrees: [...world.degrees, { id: "chem", name: "Chem" }],
+			topics: [
+				topic("a", ["math"], { x: 0, y: 0 }),
+				topic("limits", ["math", "physics", "chem"], { x: 1000, y: 1000 }),
+				topic("b", ["physics"], { x: 10, y: 10 }),
+				topic("c", ["chem", "math"], { x: 30, y: 30 }),
+			],
+		};
+		const f = buildForest(w, [], empty);
+		const at = (id: string) => f.regions.find((r) => r.degreeId === id)!;
+		assert.deepEqual([at("math").x, at("math").y], [0, 0]);
+		assert.deepEqual([at("physics").x, at("physics").y], [10, 10]);
+		// chem holds only shared topics (limits, c): fall back to both
+		assert.deepEqual([at("chem").x, at("chem").y], [515, 515]);
+		assert.equal(at("chem").topics, 2);
 	});
 
 	it("names a region from WORLD_DEGREES when the world lacks the degree", () => {
@@ -262,7 +285,7 @@ describe("forest: buildForest — regions and coverage", () => {
 			topics: [topic("t1", ["chemistry"], { x: 4, y: 8 })],
 		};
 		const f = buildForest(w, [], empty);
-		assert.deepEqual(f.regions, [{ degreeId: "chemistry", name: "Chemistry", x: 4, y: 8 }]);
+		assert.deepEqual(f.regions, [{ degreeId: "chemistry", name: "Chemistry", x: 4, y: 8, topics: 1 }]);
 	});
 
 	it("a degree with no positioned topic has no region", () => {

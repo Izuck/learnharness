@@ -43,6 +43,8 @@ export interface ForestRegion {
 	name: string;
 	x: number;
 	y: number;
+	/** How many positioned topics list this degree (the region's size). */
+	topics: number;
 }
 
 /** A path worn between two topics by reasoning chains that cross them. */

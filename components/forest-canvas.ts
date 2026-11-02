@@ -84,10 +84,16 @@ const FLY_MS = 400;
 const FLY_K = CLEARING_K * 1.6;
 const TREE_R = CLEARING_R * 0.9;
 const MIN_TREE_PX = 1.5;
+/** A tree whose disc radius is under this many screen px draws as a plain
+ *  square (the disc's bounding box, at least MIN_TREE_PX): one rect per topic
+ *  instead of an arc, fill and stroke - the difference between a cheap and a
+ *  ruinous world-level frame at ~9k topics. */
+const DOT_BELOW_PX = 3;
 const WORLD_NAME_ALPHA = 0.55;
 const NAME_PX = 22;
 const LABEL_PX = 12;
 const IDEA_LABEL_PX = 11;
+const TOPIC_NAME_PX = 13;
 const IDEA_R_PX = 6;
 
 type Pt = { x: number; y: number };
@@ -137,6 +143,29 @@ export class ForestCanvasRenderer {
 	private states: ReadonlyMap<string, IdeaState> = new Map();
 	private topicById = new Map<string, ForestTopic>();
 	private clearings = new Map<string, Clearing>();
+	/** Lit topics (glow > 0) and regions by size: derived once per setData. */
+	private litTopics: ForestTopic[] = [];
+	private regionsBySize: ForestModel["regions"] = [];
+	private nameWidths = new Map<string, number>();
+	/** Bumped per setData; invalidates the world-level tree cache. */
+	private dataVersion = 0;
+	/** World-level tree layer: the dots drawn once into an offscreen canvas
+	 *  (viewport plus a quarter-viewport margin on every side) at zoom k0, then
+	 *  blitted scaled/offset on every frame until k drifts >10% or the camera
+	 *  leaves the margin. Per-frame cost at 9k topics drops from a 9k-rect path
+	 *  to one drawImage. */
+	private treeCache: {
+		canvas: HTMLCanvasElement;
+		k0: number;
+		x0: number;
+		y0: number;
+		w: number;
+		h: number;
+		version: number;
+	} | null = null;
+	/** True until the user moves the camera (or one was restored): while true a
+	 *  resize refits the world instead of anchoring on the old centre. */
+	private autoFit = true;
 
 	private frameId: number | null = null;
 	private dirty = true;
@@ -160,7 +189,8 @@ export class ForestCanvasRenderer {
 			.scaleExtent([this.minK, MAX_K])
 			// Our own measured size (d3's default reads SVG attributes).
 			.extent((): [[number, number], [number, number]] => [[0, 0], [this.viewW, this.viewH]])
-			.on("zoom", ({ transform }: { transform: ZoomTransform }) => {
+			.on("zoom", ({ transform, sourceEvent }: { transform: ZoomTransform; sourceEvent?: unknown }) => {
+				if (sourceEvent) this.autoFit = false; // a pan or pinch by the user
 				this.transform = transform;
 				this.markDirty();
 				this.callbacks.onCameraMove({ k: transform.k, x: transform.x, y: transform.y });
@@ -182,6 +212,7 @@ export class ForestCanvasRenderer {
 			Number.isFinite(initialCamera.x) && Number.isFinite(initialCamera.y)
 		) {
 			this.hasFit = true;
+			this.autoFit = false; // a restored camera is the user's
 			this.applyCamera(initialCamera.k, initialCamera.x, initialCamera.y);
 		}
 
@@ -192,7 +223,9 @@ export class ForestCanvasRenderer {
 			const wx = (prevW / 2 - tx) / k;
 			const wy = (prevH / 2 - ty) / k;
 			this.syncSize();
-			if (!this.hasFit) this.fitWorld();
+			// Until the user has moved the camera, a resize (the sidebar and layout
+			// settling after first paint) refits the whole world.
+			if (!this.hasFit || this.autoFit) this.fitWorld();
 			else {
 				this.refreshFit();
 				// Keep the world point under the old centre under the new one.
@@ -226,6 +259,11 @@ export class ForestCanvasRenderer {
 		this.states = ideas.states ?? new Map();
 		this.topicById = new Map(model.topics.map((t) => [t.id, t]));
 		this.clearings.clear();
+		this.dataVersion++;
+		this.treeCache = null;
+		this.nameWidths.clear();
+		this.litTopics = model.topics.filter((t) => t.glow > 0);
+		this.regionsBySize = [...model.regions].sort((a, b) => b.topics - a.topics || (a.degreeId < b.degreeId ? -1 : 1));
 		let minX = Infinity;
 		let minY = Infinity;
 		let maxX = -Infinity;
@@ -266,6 +304,7 @@ export class ForestCanvasRenderer {
 		const topic = this.topicById.get(id);
 		if (!topic || this.viewW <= 0 || this.viewH <= 0) return;
 		this.zoomTarget = null;
+		this.autoFit = false;
 		const { k, x, y } = this.transform;
 		this.fly = {
 			from: { k, x, y },
@@ -317,6 +356,7 @@ export class ForestCanvasRenderer {
 	private onWheel = (e: WheelEvent) => {
 		e.preventDefault();
 		this.fly = null;
+		this.autoFit = false;
 		const delta = -e.deltaY * (e.deltaMode === 1 ? 0.05 : e.deltaMode ? 1 : 0.002);
 		const { x, y } = this.eventPos(e);
 		const current = this.zoomTarget?.k ?? this.transform.k;
@@ -338,6 +378,7 @@ export class ForestCanvasRenderer {
 		this.downPos = this.eventPos(e);
 		this.zoomTarget = null; // a pan takes over
 		this.fly = null;
+		this.autoFit = false;
 	};
 
 	private onPointerUp = (e: PointerEvent) => {
@@ -508,6 +549,82 @@ export class ForestCanvasRenderer {
 		return `rgba(${r}, ${g}, ${b}, ${a})`;
 	}
 
+	/** Fill (and edge) the fogged topics among `topics`, in world space under
+	 *  the caller's transform. Trees under DOT_BELOW_PX collapse to squares. */
+	private paintTrees(ctx: CanvasRenderingContext2D, topics: readonly ForestTopic[], k: number): void {
+		const c = this.colors;
+		const dots = TREE_R * k < DOT_BELOW_PX;
+		const side = Math.max(MIN_TREE_PX, 2 * TREE_R * k) / k; // world units
+		const trees = new Path2D();
+		for (const t of topics) {
+			if (t.glow > 0) continue;
+			if (dots) {
+				trees.rect(t.x - side / 2, t.y - side / 2, side, side);
+			} else {
+				trees.moveTo(t.x + TREE_R, t.y);
+				trees.arc(t.x, t.y, TREE_R, 0, Math.PI * 2);
+			}
+		}
+		if (dots) {
+			ctx.fillStyle = c.treeEdge;
+			ctx.fill(trees);
+		} else {
+			ctx.fillStyle = c.tree;
+			ctx.fill(trees);
+			ctx.strokeStyle = c.treeEdge;
+			ctx.lineWidth = 1 / k;
+			ctx.stroke(trees);
+		}
+	}
+
+	/** Blit the world-level tree layer, rebuilding it when stale. Returns false
+	 *  when no cache canvas can be made (the caller then paints directly). */
+	private blitTreeCache(k: number, tx: number, ty: number): boolean {
+		const model = this.model;
+		if (!model) return false;
+		const w = this.viewW;
+		const h = this.viewH;
+		const mx = Math.round(w / 4);
+		const my = Math.round(h / 4);
+		const cw = w + 2 * mx;
+		const ch = h + 2 * my;
+		let tc = this.treeCache;
+		const fresh = (t: NonNullable<typeof tc>) => {
+			if (t.version !== this.dataVersion || t.w !== cw || t.h !== ch) return false;
+			const s = k / t.k0;
+			if (s > 1.1 || s < 1 / 1.1) return false;
+			const px = t.x0 * k + tx;
+			const py = t.y0 * k + ty;
+			return px <= 0 && py <= 0 && px + cw * s >= w && py + ch * s >= h;
+		};
+		if (!tc || !fresh(tc)) {
+			const dpr = window.devicePixelRatio || 1;
+			const canvas = tc?.canvas ?? document.createElement("canvas");
+			const bw = Math.max(1, Math.round(cw * dpr));
+			const bh = Math.max(1, Math.round(ch * dpr));
+			if (canvas.width !== bw || canvas.height !== bh) {
+				canvas.width = bw;
+				canvas.height = bh;
+			}
+			const g = canvas.getContext("2d");
+			if (!g) return false;
+			g.setTransform(1, 0, 0, 1, 0, 0);
+			g.clearRect(0, 0, bw, bh);
+			g.setTransform(dpr * k, 0, 0, dpr * k, dpr * (tx + mx), dpr * (ty + my));
+			const inCache = visibleTopics(model.topics, { k, x: tx + mx, y: ty + my }, cw, ch, TREE_R * k + 2);
+			this.paintTrees(g, inCache, k);
+			tc = this.treeCache = { canvas, k0: k, x0: (-mx - tx) / k, y0: (-my - ty) / k, w: cw, h: ch, version: this.dataVersion };
+		}
+		// Only the visible window of the cache is sampled (cost follows the
+		// viewport, not the cache): the cache's CSS point -px/s maps to screen 0.
+		const s = k / tc.k0;
+		const dpr = tc.canvas.width / cw;
+		const px = tc.x0 * k + tx;
+		const py = tc.y0 * k + ty;
+		this.ctx.drawImage(tc.canvas, (-px / s) * dpr, (-py / s) * dpr, (w / s) * dpr, (h / s) * dpr, 0, 0, w, h);
+		return true;
+	}
+
 	private draw(): void {
 		this.dirty = false;
 		const ctx = this.ctx;
@@ -525,37 +642,29 @@ export class ForestCanvasRenderer {
 		const cam = this.transform;
 		const { k, x: tx, y: ty } = cam;
 		const level = forestLevel(k);
-		const visible = visibleTopics(model.topics, cam, w, h, 2 * CLEARING_R * k + 40);
-		const lit = visible.filter((t) => t.glow > 0);
+
+		// 2. Trees. At world level the whole layer comes from the offscreen
+		// cache; otherwise every visible fogged topic is drawn as one batched path.
+		const cached = level === "world" && this.blitTreeCache(k, tx, ty);
+		let visible: ForestTopic[] = [];
+		let lit: ForestTopic[];
+		if (cached) {
+			const pad = 2 * CLEARING_R * k + 40;
+			lit = this.litTopics.filter((t) => {
+				const sx = t.x * k + tx;
+				const sy = t.y * k + ty;
+				return sx >= -pad && sx <= w + pad && sy >= -pad && sy <= h + pad;
+			});
+		} else {
+			visible = visibleTopics(model.topics, cam, w, h, 2 * CLEARING_R * k + 40);
+			lit = visible.filter((t) => t.glow > 0);
+		}
 
 		// World space: line widths and radii divide by k.
 		ctx.save();
 		ctx.translate(tx, ty);
 		ctx.scale(k, k);
-
-		// 2. Trees: every visible fogged topic, one batched path.
-		const dots = TREE_R * k < MIN_TREE_PX;
-		const trees = new Path2D();
-		for (const t of visible) {
-			if (t.glow > 0) continue;
-			if (dots) {
-				const half = MIN_TREE_PX / 2 / k;
-				trees.rect(t.x - half, t.y - half, MIN_TREE_PX / k, MIN_TREE_PX / k);
-			} else {
-				trees.moveTo(t.x + TREE_R, t.y);
-				trees.arc(t.x, t.y, TREE_R, 0, Math.PI * 2);
-			}
-		}
-		if (dots) {
-			ctx.fillStyle = c.treeEdge;
-			ctx.fill(trees);
-		} else {
-			ctx.fillStyle = c.tree;
-			ctx.fill(trees);
-			ctx.strokeStyle = c.treeEdge;
-			ctx.lineWidth = 1 / k;
-			ctx.stroke(trees);
-		}
+		if (!cached) this.paintTrees(ctx, visible, k);
 
 		// 3. Light: a radial glow per lit topic.
 		for (const t of lit) {
@@ -611,17 +720,29 @@ export class ForestCanvasRenderer {
 			ctx.globalAlpha = 1;
 		}
 
-		// 5. Degree names: faint italics, fading out by REGION_K * 2.
+		// 5. Degree names: faint italics, fading out by REGION_K * 2. Greedy by
+		// region size (most topics first): a name whose box overlaps one already
+		// drawn is skipped.
 		const nameAlpha = k < REGION_K ? WORLD_NAME_ALPHA : WORLD_NAME_ALPHA * Math.max(0, 1 - (k - REGION_K) / REGION_K);
-		if (nameAlpha > 0 && model.regions.length > 0) {
+		if (nameAlpha > 0 && this.regionsBySize.length > 0) {
 			ctx.font = `italic ${NAME_PX}px ${this.fontFamily}`;
 			ctx.fillStyle = c.label;
 			ctx.textBaseline = "middle";
 			ctx.globalAlpha = nameAlpha;
-			for (const r of model.regions) {
+			const boxes: { l: number; r: number; t: number; b: number }[] = [];
+			for (const r of this.regionsBySize) {
 				const sx = r.x * k + tx;
 				const sy = r.y * k + ty;
 				if (sx < -200 || sx > w + 200 || sy < -40 || sy > h + 40) continue;
+				let width = this.nameWidths.get(r.name);
+				if (width === undefined) {
+					width = ctx.measureText(r.name).width;
+					if (!(width > 0)) width = r.name.length * NAME_PX * 0.5;
+					this.nameWidths.set(r.name, width);
+				}
+				const box = { l: sx - width / 2 - 4, r: sx + width / 2 + 4, t: sy - NAME_PX / 2 - 2, b: sy + NAME_PX / 2 + 2 };
+				if (boxes.some((o) => box.l < o.r && box.r > o.l && box.t < o.b && box.b > o.t)) continue;
+				boxes.push(box);
 				ctx.fillText(r.name, sx, sy);
 			}
 			ctx.globalAlpha = 1;
@@ -633,6 +754,7 @@ export class ForestCanvasRenderer {
 			ctx.textBaseline = "top";
 			const below = TREE_R * k + 3;
 			for (const t of pickLabels(visible, LABEL_BUDGET)) {
+				if (level === "clearing" && t.glow > 0) continue; // named above its clearing
 				const sx = t.x * k + tx;
 				const sy = t.y * k + ty;
 				if (sx < -100 || sx > w + 100 || sy < -100 || sy > h + 100) continue;
@@ -652,6 +774,12 @@ export class ForestCanvasRenderer {
 		const c = this.colors;
 		const { pos, edges } = this.clearingOf(topic);
 		if (pos.size === 0) return;
+		// The topic's name, just above its clearing.
+		ctx.font = `${TOPIC_NAME_PX}px ${this.fontFamily}`;
+		ctx.fillStyle = c.label;
+		ctx.textAlign = "center";
+		ctx.textBaseline = "bottom";
+		ctx.fillText(topic.name, topic.x * k + tx, topic.y * k + ty - CLEARING_R * k - 6);
 		if (edges.length > 0) {
 			ctx.strokeStyle = c.label;
 			ctx.globalAlpha = 0.35;

@@ -76,7 +76,7 @@ const topic = (id: string, ideas: string[] = []): ForestTopic => ({
 	counts: { seen: ideas.length, held: 0, fast: 0 }, glow: ideas.length > 0 ? 0.5 : 0,
 });
 const model = (over: Partial<ForestModel> = {}): ForestModel => ({
-	topics: [topic("t1", ["n1"]), topic("t2")], regions: [{ degreeId: "physics", name: "Physics", x: 0, y: 0 }], trails: [],
+	topics: [topic("t1", ["n1"]), topic("t2")], regions: [{ degreeId: "physics", name: "Physics", x: 0, y: 0, topics: 2 }], trails: [],
 	uncharted: [], unplaced: 0, unpositioned: 0, coverage: { mapped: 1, total: 2 }, ...over,
 });
 const snap = (m: ForestModel | null, propositions: GraphNode[] = [node("n1", "Idea one")]): ForestSnapshot => ({
