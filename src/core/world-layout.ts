@@ -38,13 +38,15 @@ export const WORLD_DEGREES: readonly WorldDegree[] = [
 	{ id: "env", name: "Environmental Engineering" },
 	{ id: "nuclear", name: "Nuclear Engineering" },
 	{ id: "matsci", name: "Materials Science & Engineering" },
+	{ id: "bme", name: "Biomedical Engineering" },
 ];
 
-/** Degree anchors in world units (the approved mockup, ×100). The four
- *  connecting engineering degrees sit between the fields they draw on:
- *  compe between ee and cs, civil beside me, env between earth-space, me and
- *  civil, nuclear beside physics toward chemistry, matsci between physics,
- *  chemistry and ee. */
+/** Degree anchors in world units (the approved mockup, ×100). The connecting
+ *  engineering degrees sit between the fields they draw on: compe between ee
+ *  and cs, civil beside me, env between earth-space, me and civil, nuclear
+ *  beside physics toward chemistry, matsci between physics, chemistry and ee,
+ *  bme between biology and ee. Their shared topics land between degrees on
+ *  their own (anchorOf); the anchor only places the topics unique to them. */
 export const DEGREE_ANCHORS: Readonly<Record<string, WorldPosition>> = {
 	"earth-space": { x: 14000, y: 11000 },
 	math: { x: 32000, y: 27000 },
@@ -59,6 +61,7 @@ export const DEGREE_ANCHORS: Readonly<Record<string, WorldPosition>> = {
 	env: { x: 3000, y: 30000 },
 	nuclear: { x: 60000, y: 3000 },
 	matsci: { x: 67000, y: 19000 },
+	bme: { x: 88000, y: 40000 },
 };
 
 const ANCHOR_STRENGTH = 0.08;
