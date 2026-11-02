@@ -24,6 +24,8 @@ import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 
 import {
 	IDLE_TURN_TIMEOUT_MS,
+	addIdleProcess,
+	addLiveProcess,
 	MAX_IDLE_PROCESSES,
 	endLiveSession,
 	idleTurnTimeoutMs,
@@ -424,4 +426,28 @@ test("endLiveSession ends a finished job's kept process (sub-agents send no next
 	assert.ok(isAlive(spawns[0]!.child));
 	endLiveSession("job-run");
 	await waitForExit(spawns[0]!.child);
+});
+
+test("a lesson's newer process supersedes one an earlier module copy kept (dev reload), whatever its owner", (t) => {
+	t.after(() => killAllLiveProcesses());
+	const killed: string[] = [];
+	const fake = (name: string, sessionId: string) => ({ owner: Symbol(name), sessionId, kill: () => killed.push(name) });
+	addIdleProcess(fake("before reload, idle", "reloaded-lesson"));
+	addLiveProcess(fake("before reload, waiting", "other-lesson"));
+	addIdleProcess(fake("after reload", "reloaded-lesson"));
+	assert.deepEqual([...killed], ["before reload, idle"]);
+	addLiveProcess(fake("after reload, waiting", "other-lesson"));
+	assert.deepEqual([...killed], ["before reload, idle", "before reload, waiting"]);
+});
+
+test("a process whose CLI compacted its own conversation is not kept: the next message replays", async (t) => {
+	// The CLI's auto-compaction rewrites the lesson it holds, so it no longer matches the snapshot.
+	const compacted = JSON.stringify({ type: "system", subtype: "compact_boundary", compact_metadata: { trigger: "auto", pre_tokens: 180000 } });
+	const { runClaude, spawns } = createFakeRun(t, [[compacted, ...textMessage("one"), WAIT_FOR_USER, ...textMessage("stale")], textMessage("fresh")]);
+	const stream = createClaudeCodeStreamFunction(runClaude);
+	const first = await runTurn(stream, [HI]);
+	assert.equal(textOf(first), "one");
+	await waitForExit(spawns[0]!.child);
+	assert.equal(textOf(await runTurn(stream, [HI, first, NEXT])), "fresh");
+	assert.equal(spawns.length, 2);
 });

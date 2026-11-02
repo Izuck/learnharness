@@ -519,6 +519,8 @@ class ClaudeProcess implements LiveProcess {
 	private readonly cancelledIds = new Set<string>();
 	private readonly ignoredNativeCalls = new Map<string, string>();
 	private pendingError: string | undefined;
+	// The CLI auto-compacted the lesson it holds: never kept idle again.
+	private compacted = false;
 	private contextWindow: number | undefined;
 	private resolvedModel: string | undefined;
 	private contextProbe: ContextWindowProbe | undefined;
@@ -746,6 +748,13 @@ class ClaudeProcess implements LiveProcess {
 			this.turn.setRateLimit(event.info);
 			return;
 		}
+		if (event.type === "compacted") {
+			// The CLI rewrote the lesson it holds, so `conversation` no longer describes it. The turn
+			// in flight carries on; the process is never kept for the next message (settle kills it).
+			this.compacted = true;
+			if (this.phase === "idle") this.kill();
+			return;
+		}
 		if (this.phase === "idle") {
 			// The CLI acted without being asked: it no longer holds the lesson the snapshot describes.
 			console.warn("claude CLI produced output while idle; ending it:", event.type);
@@ -825,8 +834,9 @@ class ClaudeProcess implements LiveProcess {
 		if (this.phase !== "streaming" || !this.turn.finished) return;
 		const message = this.turn.getMessage();
 		// Never keep a process in a state the snapshot cannot describe: an error, a cut-off answer,
-		// a response that also streamed tool intents, or MCP requests nobody admitted.
-		const clean = message.stopReason === "stop" && this.turn.getIntents().length === 0 && this.bridge.getPendingToolCalls().length === 0;
+		// a response that also streamed tool intents, MCP requests nobody admitted, or a conversation
+		// the CLI compacted on its own.
+		const clean = !this.compacted && message.stopReason === "stop" && this.turn.getIntents().length === 0 && this.bridge.getPendingToolCalls().length === 0;
 		if (this.sessionId && !this.stopping && !this.closed && clean) this.becomeIdle(message);
 		else this.kill();
 	}

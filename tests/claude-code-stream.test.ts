@@ -701,6 +701,10 @@ test("parseCliLine reads the init model, and ignores an init without one", () =>
 	assert.equal(parseCliLine('{"type":"system","subtype":"status","model":"claude-opus-5-5"}'), null);
 });
 
+test("parseCliLine reports the CLI compacting its own conversation", () => {
+	assert.deepEqual(parseCliLine('{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto","pre_tokens":180000}}'), { type: "compacted" });
+});
+
 test("parseCliLine ignores non-JSON, system, allowed rate-limit and successful result lines", () => {
 	assert.equal(parseCliLine("not json"), null);
 	assert.equal(parseCliLine("null"), null);

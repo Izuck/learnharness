@@ -1,6 +1,9 @@
 /**
  * The registry of CLI processes kept alive between stream calls (forest spec C): at most one per
- * lesson (owner + session ID). A process is registered in one of two ways:
+ * lesson (session ID). Only the stream function that started a process (its owner) may continue
+ * it, but a lesson's newer process supersedes any other by session ID alone, so one an earlier
+ * module copy kept (a dev reload mints a new owner) ends instead of lingering until its timeout.
+ * A process is registered in one of two ways:
  *   - waiting on tool results: its turn ended on admitted tool calls whose MCP requests are held
  *     until pi calls back with the results (LIVE_PROCESS_IDLE_TIMEOUT_MS);
  *   - idle: its turn ended normally and stdin stays open for the learner's next message
@@ -38,9 +41,11 @@ const liveProcesses = (registry[REGISTRY] ??= new Map<LiveProcess, Entry>());
 
 function register(process: LiveProcess, idle: boolean, timeoutMs: number): void {
 	removeLiveProcess(process);
-	// One live process per lesson: a newer one supersedes whatever else that lesson left behind.
+	// One live process per lesson: a newer one supersedes whatever else that lesson left behind,
+	// from any owner. Chat IDs and job IDs are unique; the agents that share a chat ID (teacher,
+	// prober, practice) run on it one at a time.
 	for (const other of [...liveProcesses.keys()]) {
-		if (other.owner === process.owner && other.sessionId === process.sessionId) evict(other);
+		if (other.sessionId === process.sessionId) evict(other);
 	}
 
 	const timer = setTimeout(() => evict(process), timeoutMs);

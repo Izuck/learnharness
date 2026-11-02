@@ -10,6 +10,7 @@ export type CliBlock = { type: "text" } | { type: "thinking" } | { type: "toolUs
 
 export type CliEvent =
 	| { type: "init"; model: string }
+	| { type: "compacted" }
 	| { type: "rateLimit"; info: RateLimitInfo }
 	| { type: "messageStart"; usage: CliUsage }
 	| { type: "blockStart"; index: number; block: CliBlock }
@@ -180,7 +181,9 @@ export function parseCliLine(text: string): CliEvent | null {
 	switch (line.type) {
 		// The session-start line names the model the CLI actually resolved the
 		// requested alias to (opus -> claude-opus-5-5); only a non-empty string counts.
+		// compact_boundary: the CLI auto-compacted the conversation it holds.
 		case "system":
+			if (line.subtype === "compact_boundary") return { type: "compacted" };
 			return line.subtype === "init" && typeof line.model === "string" && line.model !== "" ? { type: "init", model: line.model } : null;
 
 		// Every recognised status is kept, "allowed" included: it supersedes an earlier warning.
