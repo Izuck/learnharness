@@ -415,6 +415,27 @@ describe("forest geometry: pickLabels", () => {
 		assert.deepEqual(pickLabels(ts, 10).map((t) => t.id), ["bright", "m", "a", "z", "fog1", "fog2"]);
 	});
 
+	it("equals the full-sort reference on a large seeded input", () => {
+		let seed = 12345;
+		const rand = () => {
+			seed = (seed * 1664525 + 1013904223) >>> 0;
+			return seed / 2 ** 32;
+		};
+		const names = ["alpha", "Beta", "gamma", "delta", "Épsilon", "zeta", "eta", "theta"];
+		const big = Array.from({ length: 6000 }, (_, i) =>
+			ft(`id${i}`, i, 0, rand() < 0.05 ? Math.round(rand() * 4 + 1) / 5 : 0, `${names[Math.floor(rand() * names.length)]}${Math.floor(rand() * 40)}`),
+		);
+		const collator = new Intl.Collator("en");
+		const reference = [...big].sort(
+			(a, b) => b.glow - a.glow || collator.compare(a.name, b.name) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+		);
+		assert.ok(big.filter((t) => t.glow > 0).length > 200);
+		for (const budget of [1, 50, 300, 6000, 7000]) {
+			assert.deepEqual(pickLabels(big, budget).map((t) => t.id), reference.slice(0, budget).map((t) => t.id), `budget ${budget}`);
+		}
+		assert.deepEqual(pickLabels(big, 0), []);
+	});
+
 	it("does not mutate the input", () => {
 		const ts = [ft("b", 0, 0), ft("a", 0, 0, 1)];
 		const copy = [...ts];
@@ -456,6 +477,16 @@ describe("forest geometry: layoutClearing", () => {
 		}
 		const linked = dist(m.get("idea3") as { x: number; y: number }, m.get("idea8") as { x: number; y: number });
 		assert.ok(linked < sum / count, `${linked} vs mean ${sum / count}`);
+	});
+
+	it("centres the ideas on the centre with the farthest at 0.85 of the radius", () => {
+		const m = layoutClearing(ids(12), [chain("c1", ["idea3"], "idea8")], center, 200);
+		const ps = [...m.values()];
+		const mx = ps.reduce((s, p) => s + p.x, 0) / ps.length;
+		const my = ps.reduce((s, p) => s + p.y, 0) / ps.length;
+		assert.ok(Math.abs(mx - center.x) < 1e-9 && Math.abs(my - center.y) < 1e-9);
+		const far = Math.max(...ps.map((p) => dist(p, center)));
+		assert.ok(Math.abs(far - 0.85 * 200) < 1e-9, `${far}`);
 	});
 
 	it("is deterministic", () => {

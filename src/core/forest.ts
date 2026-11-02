@@ -217,14 +217,34 @@ export function visibleTopics(
 	return out;
 }
 
-const nameCollator = new Intl.Collator();
+const nameCollator = new Intl.Collator("en");
+
+/** Label order: brighter first, then name (collator order), then id. */
+function labelOrder(a: ForestTopic, b: ForestTopic): number {
+	return b.glow - a.glow || nameCollator.compare(a.name, b.name) || cmp(a.id, b.id);
+}
 
 /** The topics to label: lit before fogged, brighter before dimmer, then by name
- *  (locale order) and id; at most `budget`. Does not mutate `topics`. */
+ *  and id; at most `budget`. Does not mutate `topics`. A bounded top-k
+ *  selection (O(n log budget), name compared only on glow ties that could still
+ *  make the cut) — pass the culled `visibleTopics` output, not the whole forest. */
 export function pickLabels(topics: readonly ForestTopic[], budget: number): ForestTopic[] {
-	return [...topics]
-		.sort((a, b) => b.glow - a.glow || nameCollator.compare(a.name, b.name) || cmp(a.id, b.id))
-		.slice(0, Math.max(0, budget));
+	const k = Math.floor(budget);
+	if (!(k > 0)) return [];
+	const best: ForestTopic[] = []; // sorted by labelOrder, length <= k
+	for (const t of topics) {
+		if (best.length === k && labelOrder(t, best[k - 1] as ForestTopic) >= 0) continue;
+		let lo = 0;
+		let hi = best.length;
+		while (lo < hi) {
+			const mid = (lo + hi) >> 1;
+			if (labelOrder(best[mid] as ForestTopic, t) <= 0) lo = mid + 1;
+			else hi = mid;
+		}
+		best.splice(lo, 0, t);
+		if (best.length > k) best.pop();
+	}
+	return best;
 }
 
 /** Lay one topic's ideas out in a clearing: the chains' premise→conclusion
