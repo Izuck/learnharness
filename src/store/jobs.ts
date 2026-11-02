@@ -70,19 +70,24 @@ function updateJob(id: string, patch: JobPatch): JobRecord | null {
 	return next;
 }
 
-/** All jobs for a chat, newest activity first. */
-function listJobs(chatId: string): JobRecord[] {
+/** Every job record, newest activity first — one readdir, one parse per file. */
+function listAllJobs(): JobRecord[] {
 	try {
 		fs.mkdirSync(JOBS_DIR, { recursive: true });
 		return fs
 			.readdirSync(JOBS_DIR)
 			.filter((f) => f.endsWith(".json"))
 			.map((f) => getJob(f.slice(0, -5)))
-			.filter((j): j is JobRecord => j !== null && j.chatId === chatId)
+			.filter((j): j is JobRecord => j !== null)
 			.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 	} catch {
 		return [];
 	}
+}
+
+/** All jobs for a chat, newest activity first. */
+function listJobs(chatId: string): JobRecord[] {
+	return listAllJobs().filter((j) => j.chatId === chatId);
 }
 
 /** The job fulfilling a given tool part, if any (spawn-hook dedup). */
@@ -115,6 +120,7 @@ export const jobStore: JobStore = {
 	getJob,
 	updateJob,
 	listJobs,
+	listAllJobs,
 	findJobByToolCallId,
 	deleteJobsForChat,
 };

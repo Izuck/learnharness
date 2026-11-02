@@ -28,6 +28,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { after, afterEach, before, describe, it } from "node:test";
+// FIRST app-side import: relocates LH_DATA_DIR to a temp dir before config.ts
+// evaluates, so this file never reads or litters the shared repo data/ (the
+// stale-job sweep scans every chat and job — against a litter-filled data/ it
+// took minutes).
+import { ISOLATED_DATA_DIR } from "./helpers/isolated-data-dir.ts";
 import { createFauxCore, fauxAssistantMessage, fauxText, fauxToolCall, type AssistantMessage, type FauxResponseStep } from "@earendil-works/pi-ai";
 import {
 	accumulateJobUsage,
@@ -172,6 +177,7 @@ after(() => {
 		}
 	}
 	researchModelOverride.current = undefined;
+	fs.rmSync(ISOLATED_DATA_DIR, { recursive: true, force: true });
 });
 
 /** A scripted pi engine (faux provider): the response queue replaces the
@@ -1768,6 +1774,55 @@ describe("stale-job recovery sweep (liveness-gated)", () => {
 		await waitFor(() => fired > 0, 8000, "recovery wake fired");
 		await waitFor(() => jobStore.getJob(jobId)!.status !== "running", 8000, "orphan settled after re-delivery");
 		assert.equal(jobStore.getJob(jobId)!.status, "done");
+	});
+
+	it("one sweep is linear: the jobs dir is listed ONCE in bulk — no per-chat listJobs, no full chat scan", () => {
+		const orphans = [orphanJob(), orphanJob(), orphanJob()];
+		// A job whose chat no longer exists is skipped, as before.
+		const ghost = orphanJob();
+		fs.unlinkSync(path.join(PATHS.chats, `${ghost.chatId}.json`));
+
+		const store = jobStore as unknown as Record<string, (...args: unknown[]) => unknown>;
+		const calls = { listJobs: 0, listAllJobs: 0, listChats: 0 };
+		const chats = chatStore as unknown as Record<string, (...args: unknown[]) => unknown>;
+		const realListJobs = store.listJobs!;
+		const realListAllJobs = store.listAllJobs;
+		const realListChats = chats.listChats!;
+		store.listJobs = (...args) => {
+			calls.listJobs++;
+			return realListJobs.apply(jobStore, args);
+		};
+		if (realListAllJobs) {
+			store.listAllJobs = (...args) => {
+				calls.listAllJobs++;
+				return realListAllJobs.apply(jobStore, args);
+			};
+		}
+		chats.listChats = (...args) => {
+			calls.listChats++;
+			return realListChats.apply(chatStore, args);
+		};
+		const respawnedIds: string[] = [];
+		setJobRespawn((id) => {
+			respawnedIds.push(id);
+		});
+		try {
+			resetSweepThrottle();
+			recoverStaleJobs();
+		} finally {
+			store.listJobs = realListJobs;
+			if (realListAllJobs) store.listAllJobs = realListAllJobs;
+			chats.listChats = realListChats;
+		}
+		for (const o of orphans) {
+			assert.ok(respawnedIds.includes(o.jobId), "every orphan with a live chat is still recovered");
+			jobStore.updateJob(o.jobId, { status: "done", activity: "settled (test)" });
+		}
+		assert.ok(!respawnedIds.includes(ghost.jobId), "a job whose chat is gone is skipped");
+		jobStore.updateJob(ghost.jobId, { status: "done", activity: "settled (test)" });
+		assert.equal(calls.listAllJobs, 1, "the jobs dir is listed once per sweep");
+		assert.equal(calls.listJobs, 0, "never once per chat (the chats x jobs file-read blowup)");
+		assert.equal(calls.listChats, 0, "the sweep resolves chats directly, not by parsing every chat file");
 	});
 });
 

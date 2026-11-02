@@ -737,10 +737,19 @@ export function recoverStaleJobs(): void {
 	if (now - s.lastSweepAt < SWEEP_THROTTLE_MS) return;
 	s.lastSweepAt = now;
 	try {
-		for (const chat of stores.chatStore.listChats()) {
-			for (const job of stores.jobStore.listJobs(chat.id)) {
+		// Linear: ONE pass over the jobs store, grouped by chat (newest
+		// activity first within a chat), each chat resolved by a direct
+		// lookup — never chats x jobs file reads.
+		const byChat = new Map<string, JobRecord[]>();
+		for (const job of stores.jobStore.listAllJobs()) {
+			const group = byChat.get(job.chatId);
+			if (group) group.push(job);
+			else byChat.set(job.chatId, [job]);
+		}
+		for (const [chatId, jobs] of byChat) {
+			if (!stores.chatStore.getChat(chatId)) continue; // chat gone: its jobs are not ours to recover
+			for (const job of jobs) {
 				if (isJobLive(job.id)) continue; // never re-run beside live computation
-				if (!stores.chatStore.getChat(job.chatId)) continue;
 				if (isTurnRunning(job.chatId)) continue;
 				const recovered = normalizeLegacyResult(job);
 				if (recovered.delivery?.status === "pending") {
