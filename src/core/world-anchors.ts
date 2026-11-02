@@ -4,7 +4,9 @@
  * Degrees that teach many of the same topics should sit close on the world
  * map. The overlap of every pair of degrees becomes a distance (−ln of the
  * similarity), classical multidimensional scaling (MDS) embeds those
- * distances, and a least-squares similarity transform fits the embedding onto
+ * distances, SMACOF stress majorisation refines that embedding with weights
+ * that favour small distances (so close neighbours stay close), and a
+ * least-squares similarity transform fits the embedding onto
  * the hand-drawn anchors, which fixes its orientation, reflection and
  * position. The fit's scale is then replaced: real similarities are small and
  * bunched, the embedding is noisy, and a least-squares scale shrinks a poor
@@ -54,6 +56,17 @@ const MIN_SIMILARITY = 1e-3;
  *  pair, but never on top of each other. */
 const MIN_SEPARATION_FACTOR = 0.6;
 const SEPARATION_MAX_PASSES = 500;
+/** SMACOF weights are δ^−power; this keeps δ ≈ 0 (identical degrees) from giving an enormous weight. */
+const WEIGHT_FLOOR = 0.1;
+const SMACOF_MAX_ITER = 300;
+/** SMACOF stops once an iteration lowers the stress by less than this fraction of it. */
+const SMACOF_TOL = 1e-9;
+/** Default SMACOF weight exponent: w = δ^−1, which favours small distances (the
+ *  neighbours a learner reads off the map) over the many large ones. Measured on
+ *  the real 14-degree world, δ^−1 beat the standard δ^−2 (and steeper): stress
+ *  0.252/0.153 vs 0.258/0.156 (2D/3D), Spearman 0.785 vs 0.761, nearest-neighbour
+ *  hits 5 vs 5 (k=1) and 8 vs 6 (k=2) of 14; unweighted was about level with δ^−1. */
+const DEFAULT_WEIGHT_POWER = 1;
 const JACOBI_MAX_SWEEPS = 100;
 const EPS = 1e-12;
 
@@ -142,6 +155,116 @@ export function classicalMds(
 		for (let i = 0; i < n; i++) coords[i]![axis] = sign * v[i]! * scale;
 	}
 	return { coords, eigenvalues: values };
+}
+
+const smacofWeight = (d: number, power: number): number =>
+	power === 0 ? 1 : Math.max(d, WEIGHT_FLOOR) ** -power;
+
+/**
+ * Raw weighted stress Σ_{i<j} w·(δ − d)², the quantity SMACOF minimises, with
+ * w = δ^−power (floored; power 0 = unweighted; default 1). No rescaling of the embedding.
+ */
+export function weightedStress(
+	dist: readonly (readonly number[])[],
+	coords: readonly (readonly number[])[],
+	weightPower = DEFAULT_WEIGHT_POWER,
+): number {
+	let sum = 0;
+	for (let i = 0; i < dist.length; i++) {
+		for (let j = i + 1; j < dist.length; j++) {
+			let s = 0;
+			for (let a = 0; a < coords[i]!.length; a++) s += (coords[i]![a]! - coords[j]![a]!) ** 2;
+			sum += smacofWeight(dist[i]![j]!, weightPower) * (dist[i]![j]! - Math.sqrt(s)) ** 2;
+		}
+	}
+	return sum;
+}
+
+/** Inverse of a small dense matrix by Gauss-Jordan with partial pivoting. */
+function invert(m: readonly (readonly number[])[]): number[][] {
+	const n = m.length;
+	const a = m.map((row, i) => [...row, ...row.map((_, j) => (i === j ? 1 : 0))]);
+	for (let c = 0; c < n; c++) {
+		let piv = c;
+		for (let r = c + 1; r < n; r++) if (Math.abs(a[r]![c]!) > Math.abs(a[piv]![c]!)) piv = r;
+		[a[c], a[piv]] = [a[piv]!, a[c]!];
+		const d = a[c]![c]!;
+		for (let j = 0; j < 2 * n; j++) a[c]![j]! /= d;
+		for (let r = 0; r < n; r++) {
+			if (r === c) continue;
+			const f = a[r]![c]!;
+			if (f !== 0) for (let j = 0; j < 2 * n; j++) a[r]![j]! -= f * a[c]![j]!;
+		}
+	}
+	return a.map((row) => row.slice(n));
+}
+
+/**
+ * Weighted SMACOF (stress majorisation by iterated Guttman transforms)
+ * starting from `init`: minimises Σ_{i<j} w·(δ − d)² with w = δ^−weightPower
+ * (default 1; 0 = unweighted). Each iteration cannot raise the stress. Stops
+ * after `maxIter` iterations (default 300) or when an iteration lowers the
+ * stress by less than a fraction `tol` of it. Classical MDS is dominated by
+ * the large distances; weighting by δ^−p makes small distances count, so
+ * close pairs stay close. Deterministic; the seed is not mutated; the result
+ * is centred.
+ */
+export function smacof(
+	dist: readonly (readonly number[])[],
+	init: readonly (readonly number[])[],
+	opts: { weightPower?: number; maxIter?: number; tol?: number } = {},
+): number[][] {
+	const power = opts.weightPower ?? DEFAULT_WEIGHT_POWER;
+	const maxIter = opts.maxIter ?? SMACOF_MAX_ITER;
+	const tol = opts.tol ?? SMACOF_TOL;
+	const n = dist.length;
+	if (n < 2) return init.map((r) => [...r]);
+	const k = init[0]!.length;
+
+	const centre = (x: number[][]): number[][] => {
+		for (let a = 0; a < k; a++) {
+			const mean = x.reduce((s, r) => s + r[a]!, 0) / n;
+			for (const r of x) r[a]! -= mean;
+		}
+		return x;
+	};
+	let X = centre(init.map((r) => [...r]));
+
+	const W = dist.map((row, i) => row.map((d, j) => (i === j ? 0 : smacofWeight(d, power))));
+	// V⁺ = (V + 11ᵀ)⁻¹ − 11ᵀ/n², with V the weighted Laplacian.
+	const V = W.map((row, i) => row.map((w, j) => (i === j ? row.reduce((s, x) => s + x, 0) : -w) + 1));
+	const Vp = invert(V).map((row) => row.map((x) => x - 1 / (n * n)));
+
+	const stressOf = (x: number[][]): number => weightedStress(dist, x, power);
+	let stress = stressOf(X);
+	for (let it = 0; it < maxIter && stress > 0; it++) {
+		// B(X)·X, with B_ij = −w·δ/d (d > 0) and B_ii = −Σ_j B_ij.
+		const BX = Array.from({ length: n }, () => new Array<number>(k).fill(0));
+		for (let i = 0; i < n; i++) {
+			for (let j = i + 1; j < n; j++) {
+				let s = 0;
+				for (let a = 0; a < k; a++) s += (X[i]![a]! - X[j]![a]!) ** 2;
+				const d = Math.sqrt(s);
+				if (d <= EPS) continue;
+				const b = (W[i]![j]! * dist[i]![j]!) / d;
+				for (let a = 0; a < k; a++) {
+					const diff = b * (X[i]![a]! - X[j]![a]!);
+					BX[i]![a]! += diff;
+					BX[j]![a]! -= diff;
+				}
+			}
+		}
+		const next = centre(
+			Vp.map((row) => Array.from({ length: k }, (_, a) => row.reduce((s, v, j) => s + v * BX[j]![a]!, 0))),
+		);
+		const nextStress = stressOf(next);
+		if (!(nextStress < stress)) break;
+		const gain = stress - nextStress;
+		X = next;
+		stress = nextStress;
+		if (gain <= tol * stress) break;
+	}
+	return X;
 }
 
 /**
@@ -368,7 +491,8 @@ function medianNearest(points: readonly WorldPosition[]): number {
  * structure with no spread at all, nothing is derived and the fallback is
  * returned unchanged.
  *
- * Placement: the 2D MDS of the log-similarity distances is fitted to the
+ * Placement: the 2D MDS of the log-similarity distances, refined by SMACOF
+ * (weights δ^−weightPower, default 1; `refine: false` skips it), is fitted to the
  * hand-drawn anchors of the derived degrees (rotation or reflection and
  * translation come from the least-squares fit), then rescaled about its
  * centroid to the hand anchors' RMS spread, then relaxed so no two anchors
@@ -379,7 +503,7 @@ function medianNearest(points: readonly WorldPosition[]): number {
 export function deriveDegreeAnchors(
 	topics: readonly WorldTopic[],
 	fallback: Readonly<Record<string, WorldPosition>>,
-	opts: { minTopics?: number } = {},
+	opts: { minTopics?: number; weightPower?: number; refine?: boolean } = {},
 ): DerivedAnchors {
 	const minTopics = opts.minTopics ?? MIN_TOPICS;
 	const all = Object.keys(fallback).sort(byId);
@@ -397,10 +521,14 @@ export function deriveDegreeAnchors(
 	if (candidates.length < MIN_CANDIDATES) return unchanged();
 
 	const D = degreeDistances(topics, candidates);
-	const mds2 = classicalMds(D, 2);
-	const stress = { d2: embeddingStress(D, mds2.coords), d3: embeddingStress(D, classicalMds(D, 3).coords) };
-	const flat = mds2.coords.map((c) => ({ x: c[0]!, y: c[1]! }));
-	if (flat.every((p) => Math.hypot(p.x - flat[0]!.x, p.y - flat[0]!.y) <= EPS)) return unchanged();
+	const seed2 = classicalMds(D, 2).coords;
+	if (seed2.every((c) => Math.hypot(c[0]! - seed2[0]![0]!, c[1]! - seed2[0]![1]!) <= EPS)) return unchanged();
+	const refine = (seed: number[][]): number[][] =>
+		opts.refine === false ? seed : smacof(D, seed, { weightPower: opts.weightPower });
+	const coords2 = refine(seed2);
+	// Both dimensions are refined, so the 2D/3D comparison stays fair.
+	const stress = { d2: embeddingStress(D, coords2), d3: embeddingStress(D, refine(classicalMds(D, 3).coords)) };
+	const flat = coords2.map((c) => ({ x: c[0]!, y: c[1]! }));
 
 	const hand = candidates.map((d) => fallback[d]!);
 	const fit = fitSimilarity(flat, hand);

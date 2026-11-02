@@ -3,7 +3,8 @@
  * overlap by classical MDS on a log-similarity distance, aligned to the
  * hand-drawn map. Properties: the Jacobi eigen routine and MDS are exact on
  * known inputs, a topic shared by k degrees weighs 1/(k−1), distance is
- * −ln(similarity), heavily overlapping degrees end up close, the derived map
+ * −ln(similarity), SMACOF refinement keeps close neighbours close and never
+ * raises weighted stress, heavily overlapping degrees end up close, the derived map
  * keeps the hand-drawn map's spread and a minimum separation, degrees with
  * too little data keep their fallback, and the result is deterministic.
  */
@@ -19,6 +20,8 @@ import {
 	jacobiEigen,
 	matchSpread,
 	separateAnchors,
+	smacof,
+	weightedStress,
 } from "../src/core/world-anchors.ts";
 
 const near = (a: number, b: number, tol = 1e-9): void => assert.ok(Math.abs(a - b) <= tol, `${a} vs ${b}`);
@@ -274,6 +277,80 @@ const minPair = (ps: readonly WorldPosition[]): number => {
 	return m;
 };
 
+/** A deterministic, non-Euclidean distance matrix: partners (2i, 2i+1) at 0.5, everyone else far. */
+function partnered(pairs: number, far = 5): number[][] {
+	const n = pairs * 2;
+	return Array.from({ length: n }, (_, i) =>
+		Array.from({ length: n }, (__, j) => (i === j ? 0 : i >> 1 === j >> 1 ? 0.5 : far + ((i * 7 + j * 7) % 5) * 0.1)),
+	);
+}
+
+describe("world anchors: smacof", () => {
+	const noisy = partnered(5);
+	for (const power of [0, 1, 2]) {
+		it(`never increases weighted stress compared with its classical-MDS seed (weight power ${power})`, () => {
+			const seed = classicalMds(noisy, 2).coords;
+			const out = smacof(noisy, seed, { weightPower: power });
+			assert.ok(weightedStress(noisy, out, power) <= weightedStress(noisy, seed, power) + 1e-9);
+			assert.ok(weightedStress(noisy, out, power) < weightedStress(noisy, seed, power), "and strictly improves here");
+		});
+	}
+
+	it("recovers a planar configuration from a perturbed start (stress ≈ 0)", () => {
+		const pts = [
+			[0, 0],
+			[3, 0],
+			[3, 4],
+			[-2, 5],
+			[1, -2],
+			[6, 2],
+			[2, 2],
+		];
+		const D = pts.map((p) => pts.map((q) => Math.hypot(p[0]! - q[0]!, p[1]! - q[1]!)));
+		const start = pts.map((p, i) => [p[0]! + Math.sin(i * 2.1) * 1.5, p[1]! + Math.cos(i * 1.3) * 1.5]);
+		const out = smacof(D, start);
+		assert.ok(embeddingStress(D, out) < 1e-3, `stress ${embeddingStress(D, out)}`);
+	});
+
+	it("is deterministic and does not mutate its seed", () => {
+		const seed = classicalMds(noisy, 2).coords;
+		const before = JSON.stringify(seed);
+		assert.deepEqual(smacof(noisy, seed), smacof(noisy, seed));
+		assert.equal(JSON.stringify(seed), before);
+	});
+
+	it("keeps each point's nearest neighbour when the seed already has it", () => {
+		for (const k of [2, 3]) {
+			const out = smacof(noisy, classicalMds(noisy, k).coords);
+			for (let i = 0; i < noisy.length; i++) {
+				let best = -1;
+				let bd = Infinity;
+				for (let j = 0; j < noisy.length; j++) {
+					if (j === i) continue;
+					const d = Math.hypot(...out[i]!.map((x, a) => x - out[j]![a]!));
+					if (d < bd) [best, bd] = [j, d];
+				}
+				assert.equal(best, i ^ 1, `point ${i} in ${k}D`);
+			}
+		}
+	});
+
+	it("handles coincident seed points and a single point", () => {
+		const D = [
+			[0, 1, 1],
+			[1, 0, 1],
+			[1, 1, 0],
+		];
+		const out = smacof(D, [
+			[0, 0],
+			[0, 0],
+			[0, 0],
+		]);
+		assert.ok(out.flat().every(Number.isFinite));
+		assert.deepEqual(smacof([[0]], [[1, 2]]), [[1, 2]]);
+	});
+});
+
 describe("world anchors: matchSpread", () => {
 	it("rescales about the centroid so the RMS distance from it is the target", () => {
 		const pts = [
@@ -512,6 +589,24 @@ describe("world anchors: deriveDegreeAnchors", () => {
 		assert.ok(Math.abs(derivedRms - handRms) / handRms < 0.05, `spread ${derivedRms} vs ${handRms}`);
 		assert.ok(minPair(ids.map((d) => out.anchors[d]!)) >= out.minSeparation! - 1e-6);
 		assert.ok(out.minSeparation! >= 0.6 * 20000 - 1e-6); // hexagon side = radius = 20000
+	});
+
+	it("keeps each degree's most-overlapping partner as its nearest anchor", () => {
+		// Four partner pairs (8 topics shared); every other pair shares one topic.
+		const ids = ["a", "b", "c", "d", "e", "f", "g", "h"];
+		const fallback = Object.fromEntries(
+			ids.map((d, i) => [d, { x: 40000 + 30000 * Math.cos(i * 0.9), y: 30000 + 20000 * Math.sin(i * 0.9) }]),
+		);
+		const t: WorldTopic[] = ids.flatMap((d) => topics(30, [d]));
+		for (let i = 0; i < 8; i++) {
+			for (let j = i + 1; j < 8; j++) t.push(...topics(i >> 1 === j >> 1 ? 8 : 1, [ids[i]!, ids[j]!]));
+		}
+		const out = deriveDegreeAnchors(t, fallback);
+		assert.deepEqual(out.derived, ids);
+		ids.forEach((d, i) => {
+			const others = ids.filter((e) => e !== d).sort((x, y) => dist(out.anchors[d]!, out.anchors[x]!) - dist(out.anchors[d]!, out.anchors[y]!));
+			assert.equal(others[0], ids[i ^ 1], `nearest of ${d}`);
+		});
 	});
 
 	it("does not mutate its inputs", () => {
