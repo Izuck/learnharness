@@ -129,6 +129,23 @@ describe("duplicateDeliveryKeys", () => {
 	});
 });
 
+describe("a send_to_user call that is still streaming (CLI tool streaming)", () => {
+	const streaming = (args: unknown) => ({ type: "toolCall", id: "send-1", name: SEND_TO_USER_TOOL, arguments: args });
+	const opts = { inFlight: new Set(["a1"]) };
+
+	it("never hides the streaming call or the prose before it, whatever the partial arguments", () => {
+		for (const args of [{}, { message: "" }, { message: "Here is" }, { message: LESSON }]) {
+			const messages = [user("u1"), assistant("a1", [text("Let me explain."), streaming(args)], "pending")];
+			assert.equal(duplicateDeliveryKeys(messages, opts).size, 0, JSON.stringify(args));
+		}
+	});
+
+	it("hides only a repeat TEXT block, never the call itself, once the partial message is long enough to match", () => {
+		const messages = [user("u1"), assistant("a1", [streaming({ message: LESSON }), text(LESSON.slice(0, 20))], "pending")];
+		assert.deepEqual([...duplicateDeliveryKeys(messages, opts)], ["a1:1"]);
+	});
+});
+
 describe("consumers drop the duplicate; the model-facing history keeps it", () => {
 	it("lesson view: shows the lesson once (real record shape), a different recap twice", () => {
 		assert.deepEqual(viewProse(realShape()), [LESSON]);

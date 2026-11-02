@@ -376,7 +376,8 @@ test("tool scenario ends with toolcall_end (Claude's tool_use id, unprefixed nam
 
 	assert.deepEqual(
 		events.map((event) => event.type),
-		["start", "toolcall_start", "toolcall_end", "done"],
+		// The recorded call streams its input in three deltas before the bridge admits it.
+		["start", "toolcall_start", "toolcall_delta", "toolcall_delta", "toolcall_delta", "toolcall_end", "done"],
 	);
 
 	const toolCallEnd = events.find((event) => event.type === "toolcall_end");

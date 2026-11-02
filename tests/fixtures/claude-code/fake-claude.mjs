@@ -2,6 +2,7 @@
  * Stand-in for the claude CLI in tests. Reads the stream-json input from
  * stdin, then replays the scenario file named by FAKE_CLAUDE_SCENARIO line by
  * line. Lines with a "fake" key are directives instead of output:
+ *   {"fake":"sleep","ms":30}                 pause, so a consumer sees the lines before it as separate moments
  *   {"fake":"hold"}                          stay alive until killed, like the CLI waiting on a held MCP call
  *   {"fake":"exit","code":1,"stderr":"..."}  write stderr and exit with that code
  *   {"fake":"call","id":"toolu_...","name":"read","arguments":{...}}  call the MCP bridge and wait for its result
@@ -103,6 +104,10 @@ for (const line of lines) {
 	}
 	if (directive.fake === "wait-for-message") {
 		await parentMessages.next();
+		continue;
+	}
+	if (directive.fake === "sleep") {
+		await new Promise((resolve) => setTimeout(resolve, directive.ms));
 		continue;
 	}
 	if (directive.fake === "hold") {

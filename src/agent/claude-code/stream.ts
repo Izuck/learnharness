@@ -160,8 +160,11 @@ class ClaudeTurn {
 	private readonly output: AssistantMessage & Pick<LhMessage, "cliContextWindow" | "cliResolvedModel" | "cliRateLimit">;
 	private readonly contentIndexes = new Map<number, number>();
 	private readonly partialJson = new Map<number, string>();
-	private readonly toolBlocks = new Map<number, ToolCall>();
 	private readonly intents: ToolCall[] = [];
+	// Calls whose toolcall_end went out, i.e. admitted. Every other tool block in
+	// output.content is only a preview of the model's intent and must be withdrawn
+	// before the message settles (see withdrawUnadmitted).
+	private readonly admittedCalls = new Set<ToolCall>();
 	private ignoredNativeInMessage = 0;
 	private nativeOnlyMessages = 0;
 	lastIgnoredNativeName = "";
@@ -218,12 +221,13 @@ class ClaudeTurn {
 				const found = this.getBlock(event.index);
 				if (!found) return;
 
-				const { block } = found;
+				const { contentIndex, block } = found;
 				if (block.type !== "toolCall") return;
 
 				const partialJson = (this.partialJson.get(event.index) ?? "") + event.partialJson;
 				this.partialJson.set(event.index, partialJson);
 				block.arguments = parseStreamingJson(partialJson);
+				this.stream.push({ type: "toolcall_delta", contentIndex, delta: event.partialJson, partial: this.output });
 				return;
 			}
 
@@ -265,6 +269,9 @@ class ClaudeTurn {
 	resumeAfterIgnoredNative(): "resumed" | "limit" | "none" {
 		if (!this.waitingForAdmission || this.intents.length > 0 || this.ignoredNativeInMessage === 0) return "none";
 		if (++this.nativeOnlyMessages > MAX_NATIVE_ONLY_MESSAGES) return "limit";
+		// A bridge preview that never completed cannot be admitted; the next message restarts block indexes.
+		this.withdrawUnadmitted(() => false);
+		this.contentIndexes.clear();
 		this.output.stopReason = "pending";
 		return "resumed";
 	}
@@ -290,26 +297,53 @@ class ClaudeTurn {
 		if (!this.finished && model !== undefined) this.output.cliResolvedModel = model;
 	}
 
+	/**
+	 * Admission is the only thing that ends a tool call. The admitted calls were
+	 * normally previewed in this message already (toolcall_start/delta), so they
+	 * only get their toolcall_end; a call from an earlier message of the same
+	 * response (a parallel batch admitted piecemeal) is started and ended here.
+	 * Previews that are not being admitted are withdrawn first.
+	 */
 	admit(calls: ToolCall[]): void {
 		this.start();
+		this.withdrawUnadmitted((block) => calls.includes(block));
 		for (const call of calls) {
-			const contentIndex = this.output.content.length;
-			this.output.content.push(call);
-			this.stream.push({ type: "toolcall_start", contentIndex, partial: this.output });
+			let contentIndex = this.output.content.indexOf(call);
+			if (contentIndex === -1) {
+				contentIndex = this.output.content.length;
+				this.output.content.push(call);
+				this.stream.push({ type: "toolcall_start", contentIndex, partial: this.output });
+			}
+			this.admittedCalls.add(call);
 			this.stream.push({ type: "toolcall_end", contentIndex, toolCall: call, partial: this.output });
 		}
 		this.output.stopReason = "toolUse";
 		this.finish();
 	}
 
+	/** A cancelled call must not stay on screen as a card that can never run. */
+	withdraw(id: string): void {
+		if (this.finished || this.output.stopReason !== "toolUse") return;
+		this.withdrawUnadmitted((block) => block.id !== id);
+	}
+
 	fail(message: string, reason: "aborted" | "error"): void {
 		if (this.finished) return;
 
+		// Nothing was admitted, so no streamed preview may survive into the final message as a phantom card.
+		this.withdrawUnadmitted(() => false);
 		this.finished = true;
 		this.output.stopReason = reason;
 		this.output.errorMessage = message;
 		this.stream.push({ type: "error", reason, error: this.output });
 		this.stream.end();
+	}
+
+	/** Removes streamed tool-call previews that are not admitted and not wanted by `keep`. */
+	private withdrawUnadmitted(keep: (block: ToolCall) => boolean): void {
+		const kept = this.output.content.filter((block) => block.type !== "toolCall" || this.admittedCalls.has(block) || keep(block));
+		if (kept.length === this.output.content.length) return;
+		this.output.content.splice(0, this.output.content.length, ...kept);
 	}
 
 	private start(): void {
@@ -345,14 +379,15 @@ class ClaudeTurn {
 					this.lastIgnoredNativeName = block.name;
 					return;
 				}
-				this.toolBlocks.set(index, { type: "toolCall", id: block.id, name: toolNameFromMcp(block.name), arguments: {} });
+					// Shown while it streams, like the API provider; only admission (toolcall_end) makes it real.
+				this.contentIndexes.set(index, contentIndex);
+				this.output.content.push({ type: "toolCall", id: block.id, name: toolNameFromMcp(block.name), arguments: {} });
+				this.stream.push({ type: "toolcall_start", contentIndex, partial: this.output });
 				return;
 		}
 	}
 
 	private getBlock(index: number): { contentIndex: number; block: AssistantMessage["content"][number] } | null {
-		const tool = this.toolBlocks.get(index);
-		if (tool) return { contentIndex: -1, block: tool };
 		const contentIndex = this.contentIndexes.get(index);
 		if (contentIndex === undefined) return null;
 
@@ -378,9 +413,8 @@ class ClaudeTurn {
 
 			case "toolCall":
 				Object.assign(block, parseToolCallArguments(this.partialJson.get(index) ?? ""));
-				this.partialJson.delete(index);
-				this.toolBlocks.delete(index);
-				this.intents.push(block);
+					this.partialJson.delete(index);
+					this.intents.push(block);
 				return;
 		}
 	}
@@ -564,6 +598,7 @@ class ClaudeProcess implements LiveProcess {
 		// Already admitted work belongs to Pi and cannot be undone. A queued
 		// request, however, must never become executable after cancellation.
 		this.sourceCalls = this.sourceCalls.filter((intent) => intent.id !== call.id);
+		this.turn.withdraw(call.id);
 	}
 
 	/** Only authenticated MCP requests, never stdout intent alone, admit side effects. */
