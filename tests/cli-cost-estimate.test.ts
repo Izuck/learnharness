@@ -39,3 +39,11 @@ test("sessionCost ships a separate estimate for fully estimable CLI turns", () =
 	assert.equal(pricing.estimatedCost, one + two);
 	assert.equal(pricing.estimatedUnpriced, 0);
 });
+
+test("a CLI turn with no steps (aborted, failed, empty) estimates at $0 instead of spoiling the session's estimate", () => {
+	const empty: TurnUsage = { ...cliTurn("t0"), steps: [] };
+	const pricing = sessionCost({ turns: [cliTurn("t1"), empty] });
+	assert.equal(pricing.estimatedTurnCosts?.t0, 0);
+	assert.equal(pricing.estimatedCost, estimatedCallCost(step, "claude-code:opus")! * 2);
+	assert.equal(pricing.estimatedUnpriced, 0);
+});

@@ -82,7 +82,9 @@ export function sessionCost(record: Pick<ChatRecord, "turns">, price: CallPricer
 		const dollars = turnCost(turn, price);
 		turnCosts[turn.id] = dollars;
 		if (estimate && dollars === null && turn.model.startsWith(CLAUDE_CODE_PROVIDER + ":")) {
-			const guess = turn.steps.length === 0 ? null : estimateSteps(turn, estimate);
+			// A turn with no steps (aborted, failed, empty) made no billable call: it adds $0 rather
+			// than turning the whole session's estimate back into "unpriced".
+			const guess = estimateSteps(turn, estimate);
 			estimatedTurnCosts[turn.id] = guess;
 			if (guess === null) estimatedUnpriced++; else estimatedCost += guess;
 		}
